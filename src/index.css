@@ -1,0 +1,89 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .dark main :is(div, section, dl, table, thead, tbody, tr, th, td) {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+  }
+
+  .dark main :is(h1, h2, h3, h4, p, dt, dd, span, strong, code, td, th) {
+    color: #0f172a !important;
+  }
+
+  .dark main :is([class*="text-slate-400"], [class*="text-slate-500"]) {
+    color: #475569 !important;
+  }
+
+  .dark main :is([class*="text-red-400"], [class*="text-red-700"]) {
+    color: #b91c1c !important;
+  }
+
+  .dark main :is([class*="text-emerald-400"], [class*="text-emerald-700"]) {
+    color: #15803d !important;
+  }
+
+  .dark main :is([class*="text-amber-400"], [class*="text-amber-700"]) {
+    color: #b45309 !important;
+  }
+
+  .recharts-cartesian-axis-tick-value,
+  .recharts-cartesian-axis-tick-value tspan {
+    fill: #475569 !important;
+  }
+
+  .recharts-legend-item-text {
+    color: #334155 !important;
+  }
+
+  header,
+  [data-testid="reports-toast-container"],
+  [data-testid="quota-notification-toasts"] {
+    display: none !important;
+  }
+
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  section,
+  table,
+  tr {
+    break-inside: avoid;
+  }
+}

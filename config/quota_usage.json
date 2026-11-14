@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-14",
+  "usage": {
+    "virustotal": {
+      "used": 3,
+      "limit": 3,
+      "exhausted": true,
+      "exhaustedReason": "Daily quota reached (3/3)",
+      "upstreamRemaining": null,
+      "lastUpdatedAt": "2026-11-14T05:03:35Z"
+    },
+    "abuseipdb": {
+      "used": 1,
+      "limit": 1000,
+      "exhausted": false,
+      "exhaustedReason": null,
+      "upstreamRemaining": 994,
+      "lastUpdatedAt": "2026-11-14T05:03:34Z"
+    },
+    "alienvault": {
+      "used": 3,
+      "limit": 10000,
+      "exhausted": false,
+      "exhaustedReason": null,
+      "upstreamRemaining": null,
+      "lastUpdatedAt": "2026-11-14T05:03:36Z"
+    },
+    "shodan": {
+      "used": 0,
+      "limit": 100,
+      "exhausted": false,
+      "exhaustedReason": null,
+      "upstreamRemaining": null,
+      "lastUpdatedAt": null
+    },
+    "threatfox": {
+      "used": 0,
+      "limit": 2000,
+      "exhausted": false,
+      "exhaustedReason": null,
+      "upstreamRemaining": null,
+      "lastUpdatedAt": null
+    },
+    "urlscan": {
+      "used": 0,
+      "limit": 1000,
+      "exhausted": false,
+      "exhaustedReason": null,
+      "upstreamRemaining": null,
+      "lastUpdatedAt": null
+    }
+  }
+}

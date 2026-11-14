@@ -1,0 +1,8 @@
+{
+  "name": "SoTI Threat Intelligence",
+  "description": "Threat intelligence enrichment CLI and SOC workbench for IPs, domains, and file hashes across VirusTotal, AbuseIPDB, and AlienVault OTX.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

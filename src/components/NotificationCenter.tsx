@@ -1,0 +1,376 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  Bell,
+  CheckCheck,
+  Settings2,
+  ShieldAlert,
+  Trash2,
+  X,
+} from 'lucide-react';
+import type { QuotaState } from '../App';
+import {
+  countUnreadNotifications,
+  detectQuotaThresholdCrossings,
+  dismissNotificationAlert,
+  formatAlertTimestamp,
+  markAllNotificationsRead,
+  markNotificationRead,
+  mergeNotificationAlerts,
+  QUOTA_ALERT_THRESHOLD_PERCENT,
+  type QuotaNotificationAlert,
+} from '../utils/notifications';
+
+interface NotificationCenterProps {
+  quotaState: QuotaState;
+  isOpen: boolean;
+  onOpenPanel: () => void;
+  onClosePanel: () => void;
+  onUnreadCountChange: (count: number) => void;
+  onNavigateToApis: () => void;
+}
+
+export function NotificationCenter({
+  quotaState,
+  isOpen,
+  onOpenPanel,
+  onClosePanel,
+  onUnreadCountChange,
+  onNavigateToApis,
+}: NotificationCenterProps) {
+  const [alerts, setAlerts] = useState<QuotaNotificationAlert[]>([]);
+  const [activeToastIds, setActiveToastIds] = useState<string[]>([]);
+  const previousPercentByKeyRef = useRef<Record<string, number>>({});
+  const toastTimersRef = useRef<Map<string, number>>(new Map());
+  const panelRef = useRef<HTMLDivElement | null>(null);
+
+  // Listen continuously to App's quotaState regardless of which view is active
+  useEffect(() => {
+    const { alertsToPush, nextPercentByKey } = detectQuotaThresholdCrossings(
+      quotaState,
+      previousPercentByKeyRef.current,
+      QUOTA_ALERT_THRESHOLD_PERCENT,
+    );
+    previousPercentByKeyRef.current = nextPercentByKey;
+
+    if (alertsToPush.length === 0) return;
+
+    setAlerts((prev) => mergeNotificationAlerts(prev, alertsToPush));
+    setActiveToastIds((prev) => [
+      ...alertsToPush.map((a) => a.id),
+      ...prev.filter((id) => !alertsToPush.some((a) => a.id === id)),
+    ].slice(0, 3));
+
+    for (const alert of alertsToPush) {
+      const existingTimer = toastTimersRef.current.get(alert.id);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      const timer = window.setTimeout(() => {
+        setActiveToastIds((prev) => prev.filter((id) => id !== alert.id));
+        toastTimersRef.current.delete(alert.id);
+      }, 10000);
+      toastTimersRef.current.set(alert.id, timer);
+    }
+  }, [quotaState]);
+
+  useEffect(() => {
+    onUnreadCountChange(countUnreadNotifications(alerts));
+  }, [alerts, onUnreadCountChange]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of toastTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      toastTimersRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        onClosePanel();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClosePanel]);
+
+  const unreadCount = useMemo(() => countUnreadNotifications(alerts), [alerts]);
+  const activeToasts = useMemo(
+    () => alerts.filter((a) => activeToastIds.includes(a.id)),
+    [alerts, activeToastIds],
+  );
+
+  function dismissToastPopup(id: string) {
+    const timer = toastTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      toastTimersRef.current.delete(id);
+    }
+    setActiveToastIds((prev) => prev.filter((item) => item !== id));
+  }
+
+  function handleDismissAlert(id: string) {
+    dismissToastPopup(id);
+    setAlerts((prev) => dismissNotificationAlert(prev, id));
+  }
+
+  function handleClearAll() {
+    for (const timer of toastTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    toastTimersRef.current.clear();
+    setActiveToastIds([]);
+    setAlerts([]);
+  }
+
+  return (
+    <>
+      {isOpen && (
+        <>
+          <div
+            aria-hidden="true"
+            onClick={onClosePanel}
+            className="fixed inset-0 z-20 bg-slate-950/15 dark:bg-black/35 backdrop-blur-[1px]"
+          />
+
+          <div
+            ref={panelRef}
+            role="dialog"
+            aria-modal="false"
+            aria-label="Quota Notification Center"
+            data-testid="notification-center-panel"
+            className="fixed right-3 top-[70px] left-3 z-50 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl sm:left-auto sm:right-6 sm:w-[448px]"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 px-4 py-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <Bell className="h-4 w-4 text-slate-700 dark:text-slate-300 shrink-0" aria-hidden="true" />
+                <h2 className="text-sm font-semibold text-slate-950 dark:text-slate-50 whitespace-nowrap shrink-0">
+                  Notification Center
+                </h2>
+                <span className="font-mono text-[11px] font-medium text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap shrink-0">
+                  · {unreadCount} unread
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {unreadCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setAlerts((prev) => markAllNotificationsRead(prev))}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                  >
+                    <CheckCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                    Mark read
+                  </button>
+                )}
+                {alerts.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearAll}
+                    aria-label="Clear all notifications"
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    Clear
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onClosePanel}
+                  aria-label="Close notification center"
+                  className="rounded-md p-1 text-slate-400 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-[60vh] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800">
+              {alerts.length === 0 ? (
+                <div className="px-5 py-8 text-center">
+                  <Bell className="mx-auto h-6 w-6 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+                  <p className="mt-2 text-sm font-medium text-slate-900 dark:text-slate-100">
+                    No quota threshold alerts
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    An alert is pushed automatically whenever any API provider crosses {QUOTA_ALERT_THRESHOLD_PERCENT}% of its daily quota across any view.
+                  </p>
+                </div>
+              ) : (
+                alerts.map((alert) => {
+                  const isCritical = alert.severity === 'critical';
+                  return (
+                    <div
+                      key={alert.id}
+                      data-testid={`notification-item-${alert.providerId}`}
+                      className={`px-4 py-3.5 transition-colors ${
+                        alert.read
+                          ? 'bg-white dark:bg-slate-900'
+                          : 'bg-amber-50/40 dark:bg-amber-950/15'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="mt-0.5 shrink-0">
+                          {isCritical ? (
+                            <ShieldAlert className="h-4 w-4 text-red-600 dark:text-red-400" aria-hidden="true" />
+                          ) : (
+                            <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                          )}
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span
+                                className={`text-[11px] font-semibold uppercase tracking-wide ${
+                                  isCritical
+                                    ? 'text-red-700 dark:text-red-400'
+                                    : 'text-amber-700 dark:text-amber-400'
+                                }`}
+                              >
+                                {isCritical ? 'Quota Reached' : '90%+ Warning'}
+                              </span>
+                              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+                              <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                                {formatAlertTimestamp(alert.createdAt)}
+                              </span>
+                            </div>
+                            {!alert.read && (
+                              <span
+                                title="Unread alert"
+                                className="h-2 w-2 rounded-full bg-red-600 dark:bg-red-500 shrink-0"
+                              />
+                            )}
+                          </div>
+
+                          <p className="mt-1 text-xs font-semibold text-slate-950 dark:text-slate-50">
+                            {alert.title}
+                          </p>
+                          <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">
+                            {alert.message}
+                          </p>
+
+                          <div className="mt-2 flex flex-wrap items-center gap-3">
+                            <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                              Usage: {alert.used}/{alert.limit} ({alert.percentUsed}%)
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAlerts((prev) => markNotificationRead(prev, alert.id));
+                                onNavigateToApis();
+                              }}
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 hover:underline cursor-pointer"
+                            >
+                              <Settings2 className="h-3 w-3" aria-hidden="true" />
+                              Manage APIs
+                            </button>
+                            {!alert.read && (
+                              <button
+                                type="button"
+                                onClick={() => setAlerts((prev) => markNotificationRead(prev, alert.id))}
+                                className="text-[11px] font-medium text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100 cursor-pointer"
+                              >
+                                Mark read
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDismissAlert(alert.id)}
+                          aria-label={`Dismiss ${alert.providerName} quota alert`}
+                          className="rounded-md p-1 text-slate-400 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 shrink-0 cursor-pointer"
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {activeToasts.length > 0 && !isOpen && (
+        <div
+          data-testid="quota-notification-toasts"
+          aria-live="assertive"
+          className="fixed bottom-4 left-4 right-4 z-40 flex flex-col gap-2 sm:bottom-auto sm:top-[72px] sm:left-auto sm:right-6 sm:w-96 print:hidden"
+        >
+          {activeToasts.map((alert) => {
+            const isCritical = alert.severity === 'critical';
+            return (
+              <div
+                key={alert.id}
+                role="alert"
+                data-testid={`quota-alert-toast-${alert.providerId}`}
+                className={`flex items-start gap-3 rounded-xl border bg-white dark:bg-slate-900 px-4 py-3 shadow-lg ${
+                  isCritical
+                    ? 'border-red-300 dark:border-red-800/80'
+                    : 'border-amber-300 dark:border-amber-800/80'
+                }`}
+              >
+                {isCritical ? (
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                ) : (
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                )}
+
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-semibold text-slate-950 dark:text-slate-50">
+                    {alert.title}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300">
+                    {alert.message}
+                  </p>
+                  <div className="mt-2 flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAlerts((prev) => markNotificationRead(prev, alert.id));
+                        dismissToastPopup(alert.id);
+                        onOpenPanel();
+                      }}
+                      className="text-[11px] font-semibold text-slate-800 dark:text-slate-200 hover:underline cursor-pointer"
+                    >
+                      Open Notification Center
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAlerts((prev) => markNotificationRead(prev, alert.id));
+                        dismissToastPopup(alert.id);
+                        onNavigateToApis();
+                      }}
+                      className="text-[11px] font-semibold text-red-700 dark:text-red-400 hover:underline cursor-pointer"
+                    >
+                      Manage APIs
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => dismissToastPopup(alert.id)}
+                  aria-label={`Dismiss ${alert.providerName} quota alert banner`}
+                  className="rounded-md p-1 text-slate-400 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 shrink-0 cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}

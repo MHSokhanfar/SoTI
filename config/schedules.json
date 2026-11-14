@@ -1,0 +1,52 @@
+[
+  {
+    "id": "sched-dns-baseline",
+    "name": "Public DNS Resolver Baseline",
+    "indicators": [
+      "8.8.8.8",
+      "1.1.1.1"
+    ],
+    "source": "all",
+    "sources": [
+      "virustotal",
+      "abuseipdb",
+      "alienvault"
+    ],
+    "intervalMinutes": 1440,
+    "enabled": true,
+    "mode": "live",
+    "createdAt": "2026-11-13T18:00:00Z",
+    "updatedAt": "2026-11-13T18:00:00Z",
+    "lastRunAt": null,
+    "nextRunAt": "2026-11-15T18:00:00Z",
+    "lastStatus": "idle",
+    "lastReportFile": null,
+    "lastSummary": "Scheduled check awaiting first execution",
+    "runCount": 0
+  },
+  {
+    "id": "sched-perimeter-watch",
+    "name": "Perimeter IOC Watchlist",
+    "indicators": [
+      "185.220.101.4",
+      "44d88612fea8a8f36de82e1278abb02f"
+    ],
+    "source": "all",
+    "sources": [
+      "virustotal",
+      "abuseipdb",
+      "alienvault"
+    ],
+    "intervalMinutes": 360,
+    "enabled": true,
+    "mode": "live",
+    "createdAt": "2026-11-13T18:00:00Z",
+    "updatedAt": "2026-11-13T18:00:00Z",
+    "lastRunAt": null,
+    "nextRunAt": "2026-11-14T12:00:00Z",
+    "lastStatus": "idle",
+    "lastReportFile": null,
+    "lastSummary": "Scheduled check awaiting first execution",
+    "runCount": 0
+  }
+]
