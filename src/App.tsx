@@ -30,6 +30,7 @@ import {
   type RecentInvestigationEntry,
 } from './utils/investigationHistory';
 import type { ProviderQuotaSnapshot } from './utils/quota';
+import type { EmailAlertRecord } from './utils/emailAlerts';
 import type { ReportMeta } from './utils/reportsAnalytics';
 import type { ScheduledJob } from './utils/scheduler';
 import {
@@ -67,7 +68,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('investigate');
   const [helpOpen, setHelpOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationRequestedTab, setNotificationRequestedTab] = useState<'alerts' | 'email_rules' | null>(null);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [dispatchedEmailAlerts, setDispatchedEmailAlerts] = useState<EmailAlertRecord[]>([]);
+  const [emailAlertsRefreshNonce, setEmailAlertsRefreshNonce] = useState(0);
   const [latestReport, setLatestReport] = useState<string | null>(null);
   const [searchReports, setSearchReports] = useState<ReportMeta[]>([]);
   const [searchSchedules, setSearchSchedules] = useState<ScheduledJob[]>([]);
@@ -99,12 +103,17 @@ export default function App() {
     source: 'all',
     customSources: [...ALL_SOURCE_IDS],
     useCustomSources: false,
+    includeThreatFox: null,
+    includeUrlscan: null,
     mode: 'sample',
     results: [],
     invalidTokens: [],
     quotaSkipped: [],
     lastReportFile: null,
     lastRunMode: null,
+    activeHistoryId: null,
+    researcherNotes: '',
+    analysisMode: 'standard',
   });
 
   function refreshConfigStatus() {
@@ -273,6 +282,14 @@ export default function App() {
     setActiveTab('cli');
   }
 
+  const handleEmailAlertDispatched = useCallback((record: EmailAlertRecord) => {
+    setDispatchedEmailAlerts((prev) => [
+      record,
+      ...prev.filter((item) => item.id !== record.id),
+    ].slice(0, 25));
+    setEmailAlertsRefreshNonce((n) => n + 1);
+  }, []);
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
       <TopBar
@@ -285,7 +302,10 @@ export default function App() {
         onToggleTheme={() => setTheme((prev) => toggleThemeMode(prev))}
         notificationCount={unreadNotifications}
         notificationsOpen={notificationsOpen}
-        onToggleNotifications={() => setNotificationsOpen((prev) => !prev)}
+        onToggleNotifications={() => {
+          setNotificationRequestedTab(null);
+          setNotificationsOpen((prev) => !prev);
+        }}
         searchEntries={globalSearchEntries}
         onSearchFocus={() => refreshGlobalSearchData(false)}
         onSelectSearchResult={handleSelectGlobalSearchResult}
@@ -293,7 +313,10 @@ export default function App() {
 
       <NotificationCenter
         quotaState={quotaState}
+        emailAlerts={dispatchedEmailAlerts}
+        emailAlertsRefreshNonce={emailAlertsRefreshNonce}
         isOpen={notificationsOpen}
+        requestedTab={notificationRequestedTab}
         onOpenPanel={() => setNotificationsOpen(true)}
         onClosePanel={() => setNotificationsOpen(false)}
         onUnreadCountChange={setUnreadNotifications}
@@ -301,6 +324,8 @@ export default function App() {
           setNotificationsOpen(false);
           setActiveTab('cli');
         }}
+        onEmailAlertDispatched={handleEmailAlertDispatched}
+        onClearEmailAlerts={() => setDispatchedEmailAlerts([])}
       />
 
       <main className="mx-auto max-w-[1280px] px-4 py-6 md:px-6 md:py-8">
@@ -308,6 +333,7 @@ export default function App() {
           <InvestigateView
             state={investigationState}
             apiSettings={apiSettings}
+            extraKeyStatus={configStatus.extraKeys}
             quota={quotaState}
             theme={theme}
             onChangeState={setInvestigationState}
@@ -317,12 +343,21 @@ export default function App() {
               refreshGlobalSearchData(true);
             }}
             onOpenApiConfig={() => setActiveTab('cli')}
+            onEmailAlertTriggered={handleEmailAlertDispatched}
+            onOpenEmailAlertRules={() => {
+              setNotificationRequestedTab('email_rules');
+              setNotificationsOpen(true);
+            }}
             navigationTarget={investigateNav}
             onRecentHistoryChange={setRecentHistory}
           />
         )}
         {activeTab === 'reports' && (
-          <ReportsView theme={theme} navigationTarget={reportsNav} />
+          <ReportsView
+            theme={theme}
+            navigationTarget={reportsNav}
+            currentResults={investigationState.results}
+          />
         )}
         {activeTab === 'scheduled' && (
           <ScheduledView
@@ -331,6 +366,7 @@ export default function App() {
               refreshGlobalSearchData(true);
             }}
             onQuotaChange={setQuotaState}
+            onEmailAlertTriggered={handleEmailAlertDispatched}
             navigationTarget={scheduledNav}
           />
         )}
@@ -342,6 +378,7 @@ export default function App() {
             customKeyStatus={configStatus.customKeys}
             apiSettings={apiSettings}
             quota={quotaState}
+            emailAlertsRefreshNonce={emailAlertsRefreshNonce}
             onApiSettingsChange={(next) => {
               setApiSettings(next);
               refreshConfigStatus();
@@ -354,6 +391,7 @@ export default function App() {
             }}
             onConnectionOverridesReset={() => setConnectionOverrides({})}
             onOpenHelp={() => setHelpOpen(true)}
+            onEmailAlertDispatched={handleEmailAlertDispatched}
           />
         )}
       </main>

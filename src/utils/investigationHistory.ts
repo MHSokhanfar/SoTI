@@ -2,6 +2,18 @@ import type { LookupResult, SourceSelection } from './indicators';
 
 export const RECENT_INVESTIGATIONS_STORAGE_KEY = 'soti_recent_investigations_v1';
 export const MAX_RECENT_INVESTIGATIONS = 20;
+export const MAX_INVESTIGATION_NOTES_LENGTH = 5000;
+export const MAX_INVESTIGATION_TITLE_LENGTH = 120;
+
+export function normalizeInvestigationNotes(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/\r\n?/g, '\n').trim().slice(0, MAX_INVESTIGATION_NOTES_LENGTH);
+}
+
+export function normalizeInvestigationTitle(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/\s+/g, ' ').trim().slice(0, MAX_INVESTIGATION_TITLE_LENGTH);
+}
 
 export interface RecentVerdictSummary {
   malicious: number;
@@ -29,6 +41,8 @@ export interface RecentInvestigationEntry {
   source: SourceSelection;
   customSources: string[];
   useCustomSources: boolean;
+  includeThreatFox?: boolean | null;
+  includeUrlscan?: boolean | null;
   sourceLabels: string[];
   mode: 'sample' | 'live';
   verdictSummary: RecentVerdictSummary;
@@ -36,6 +50,12 @@ export interface RecentInvestigationEntry {
   invalidTokens: string[];
   quotaSkipped: RecentQuotaSkippedItem[];
   reportFile: string | null;
+  tags?: string[];
+  notes?: string;
+  notesUpdatedAt?: string;
+  pinned?: boolean;
+  pinnedAt?: string;
+  customTitle?: string;
 }
 
 export interface StorageLike {
@@ -95,6 +115,14 @@ export function formatInvestigationTitle(indicators: string[], fallbackRaw: stri
   return trimmed.length > 36 ? `${trimmed.slice(0, 33)}...` : trimmed || 'Empty query';
 }
 
+export function getInvestigationDisplayTitle(
+  entry: Pick<RecentInvestigationEntry, 'customTitle' | 'indicators' | 'normalizedInput' | 'rawInput'>,
+): string {
+  const custom = normalizeInvestigationTitle(entry.customTitle);
+  if (custom.length > 0) return custom;
+  return formatInvestigationTitle(entry.indicators, entry.normalizedInput || entry.rawInput);
+}
+
 export function buildRecentInvestigationEntry(params: {
   rawInput: string;
   normalizedInput: string;
@@ -102,12 +130,20 @@ export function buildRecentInvestigationEntry(params: {
   source: SourceSelection;
   customSources: string[];
   useCustomSources: boolean;
+  includeThreatFox?: boolean | null;
+  includeUrlscan?: boolean | null;
   sourceLabels: string[];
   mode: 'sample' | 'live';
   results: LookupResult[];
   invalidTokens: string[];
   quotaSkipped: RecentQuotaSkippedItem[];
   reportFile: string | null;
+  tags?: string[];
+  notes?: string;
+  notesUpdatedAt?: string;
+  pinned?: boolean;
+  pinnedAt?: string;
+  customTitle?: string;
   now?: Date;
   id?: string;
 }): RecentInvestigationEntry {
@@ -120,6 +156,11 @@ export function buildRecentInvestigationEntry(params: {
   const uniqueIndicators = Array.from(
     new Set(params.indicators.map((ind) => ind.trim()).filter(Boolean)),
   );
+  const cleanTags = Array.isArray(params.tags)
+    ? Array.from(new Set(params.tags.map((t) => String(t).trim()).filter(Boolean)))
+    : undefined;
+  const cleanNotes = normalizeInvestigationNotes(params.notes);
+  const cleanTitle = normalizeInvestigationTitle(params.customTitle);
 
   return {
     id,
@@ -131,6 +172,8 @@ export function buildRecentInvestigationEntry(params: {
     source: params.source,
     customSources: [...params.customSources],
     useCustomSources: params.useCustomSources,
+    ...(params.includeThreatFox !== undefined ? { includeThreatFox: params.includeThreatFox } : {}),
+    ...(params.includeUrlscan !== undefined ? { includeUrlscan: params.includeUrlscan } : {}),
     sourceLabels: [...params.sourceLabels],
     mode: params.mode,
     verdictSummary: summarizeLookupVerdicts(params.results),
@@ -138,7 +181,121 @@ export function buildRecentInvestigationEntry(params: {
     invalidTokens: [...params.invalidTokens],
     quotaSkipped: [...params.quotaSkipped],
     reportFile: params.reportFile,
+    ...(cleanTags && cleanTags.length > 0 ? { tags: cleanTags } : {}),
+    ...(cleanNotes.length > 0
+      ? {
+          notes: cleanNotes,
+          notesUpdatedAt:
+            typeof params.notesUpdatedAt === 'string' && params.notesUpdatedAt.trim()
+              ? params.notesUpdatedAt
+              : createdAt,
+        }
+      : {}),
+    ...(params.pinned
+      ? {
+          pinned: true,
+          pinnedAt:
+            typeof params.pinnedAt === 'string' && params.pinnedAt.trim()
+              ? params.pinnedAt
+              : createdAt,
+        }
+      : {}),
+    ...(cleanTitle.length > 0 ? { customTitle: cleanTitle } : {}),
   };
+}
+
+export function updateRecentInvestigationNotes(
+  current: RecentInvestigationEntry[],
+  entryId: string,
+  notes: string,
+  now: Date = new Date(),
+): RecentInvestigationEntry[] {
+  const cleanNotes = normalizeInvestigationNotes(notes);
+  const updatedAt = now.toISOString();
+  let changed = false;
+
+  const next = current.map((entry) => {
+    if (entry.id !== entryId) return entry;
+    const prevNotes = normalizeInvestigationNotes(entry.notes);
+    if (prevNotes === cleanNotes) return entry;
+    changed = true;
+    const rest: RecentInvestigationEntry = { ...entry };
+    if (cleanNotes.length > 0) {
+      rest.notes = cleanNotes;
+      rest.notesUpdatedAt = updatedAt;
+    } else {
+      delete rest.notes;
+      delete rest.notesUpdatedAt;
+    }
+    return rest;
+  });
+
+  return changed ? next : current;
+}
+
+export function sortRecentInvestigations(
+  entries: RecentInvestigationEntry[],
+): RecentInvestigationEntry[] {
+  if (entries.length <= 1) return entries;
+  const pinned: RecentInvestigationEntry[] = [];
+  const unpinned: RecentInvestigationEntry[] = [];
+  for (const item of entries) {
+    if (item.pinned) pinned.push(item);
+    else unpinned.push(item);
+  }
+  if (pinned.length === 0) return entries;
+  pinned.sort((a, b) => {
+    const tsA = Date.parse(a.pinnedAt || a.createdAt) || 0;
+    const tsB = Date.parse(b.pinnedAt || b.createdAt) || 0;
+    return tsB - tsA;
+  });
+  return [...pinned, ...unpinned];
+}
+
+export function togglePinRecentInvestigation(
+  current: RecentInvestigationEntry[],
+  entryId: string,
+  now: Date = new Date(),
+): RecentInvestigationEntry[] {
+  let changed = false;
+  const pinnedAt = now.toISOString();
+  const next = current.map((entry) => {
+    if (entry.id !== entryId) return entry;
+    changed = true;
+    const copy: RecentInvestigationEntry = { ...entry };
+    if (copy.pinned) {
+      delete copy.pinned;
+      delete copy.pinnedAt;
+    } else {
+      copy.pinned = true;
+      copy.pinnedAt = pinnedAt;
+    }
+    return copy;
+  });
+  return changed ? sortRecentInvestigations(next) : current;
+}
+
+export function renameRecentInvestigation(
+  current: RecentInvestigationEntry[],
+  entryId: string,
+  nextTitle: string,
+): RecentInvestigationEntry[] {
+  const cleanTitle = normalizeInvestigationTitle(nextTitle);
+  let changed = false;
+  const next = current.map((entry) => {
+    if (entry.id !== entryId) return entry;
+    const prevTitle = normalizeInvestigationTitle(entry.customTitle);
+    if (prevTitle === cleanTitle) return entry;
+    changed = true;
+    const copy: RecentInvestigationEntry = { ...entry };
+    if (cleanTitle.length > 0) {
+      copy.customTitle = cleanTitle;
+    } else {
+      delete copy.customTitle;
+    }
+    return copy;
+  });
+  return changed ? next : current;
 }
 
 export function prependRecentInvestigation(
@@ -148,7 +305,14 @@ export function prependRecentInvestigation(
 ): RecentInvestigationEntry[] {
   const limit = Math.max(1, Math.floor(maxItems));
   const filtered = current.filter((item) => item.id !== entry.id);
-  return [entry, ...filtered].slice(0, limit);
+  const combined = sortRecentInvestigations([entry, ...filtered]);
+  if (combined.length <= limit) return combined;
+
+  // Prefer evicting oldest unpinned items when enforcing history limit
+  const pinned = combined.filter((item) => item.pinned);
+  const unpinned = combined.filter((item) => !item.pinned);
+  const unpinnedBudget = Math.max(0, limit - pinned.length);
+  return [...pinned.slice(0, limit), ...unpinned.slice(0, unpinnedBudget)];
 }
 
 export function removeRecentInvestigation(
@@ -180,7 +344,52 @@ export function loadRecentInvestigations(storage?: StorageLike | null): RecentIn
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isValidRecentEntry).slice(0, MAX_RECENT_INVESTIGATIONS);
+    const entries = parsed
+      .filter(isValidRecentEntry)
+      .slice(0, MAX_RECENT_INVESTIGATIONS)
+      .map((entry) => {
+        const cleanTags = Array.isArray(entry.tags)
+          ? Array.from(
+              new Set(
+                entry.tags
+                  .filter((t): t is string => typeof t === 'string')
+                  .map((t) => t.trim())
+                  .filter(Boolean),
+              ),
+            )
+          : undefined;
+        const cleanNotes = normalizeInvestigationNotes(entry.notes);
+        const cleanTitle = normalizeInvestigationTitle(entry.customTitle);
+        const sanitized: RecentInvestigationEntry = { ...entry };
+        if (cleanTags) {
+          sanitized.tags = cleanTags;
+        }
+        if (cleanNotes.length > 0) {
+          sanitized.notes = cleanNotes;
+          if (typeof entry.notesUpdatedAt === 'string' && entry.notesUpdatedAt.trim()) {
+            sanitized.notesUpdatedAt = entry.notesUpdatedAt;
+          }
+        } else {
+          delete sanitized.notes;
+          delete sanitized.notesUpdatedAt;
+        }
+        if (entry.pinned === true) {
+          sanitized.pinned = true;
+          if (typeof entry.pinnedAt === 'string' && entry.pinnedAt.trim()) {
+            sanitized.pinnedAt = entry.pinnedAt;
+          }
+        } else {
+          delete sanitized.pinned;
+          delete sanitized.pinnedAt;
+        }
+        if (cleanTitle.length > 0) {
+          sanitized.customTitle = cleanTitle;
+        } else {
+          delete sanitized.customTitle;
+        }
+        return sanitized;
+      });
+    return sortRecentInvestigations(entries);
   } catch {
     return [];
   }

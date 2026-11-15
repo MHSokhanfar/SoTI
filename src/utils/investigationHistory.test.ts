@@ -6,13 +6,18 @@ import {
   clearRecentInvestigations,
   formatInvestigationTitle,
   formatRelativeTime,
+  getInvestigationDisplayTitle,
   getPrimaryVerdictBadge,
   loadRecentInvestigations,
   prependRecentInvestigation,
   RECENT_INVESTIGATIONS_STORAGE_KEY,
   removeRecentInvestigation,
+  renameRecentInvestigation,
   saveRecentInvestigations,
+  sortRecentInvestigations,
   summarizeLookupVerdicts,
+  togglePinRecentInvestigation,
+  updateRecentInvestigationNotes,
   type StorageLike,
 } from './investigationHistory';
 
@@ -153,4 +158,120 @@ test('formatInvestigationTitle and formatRelativeTime produce concise labels', (
   assert.equal(formatRelativeTime('2026-11-14T19:59:30.000Z', now), 'Just now');
   assert.equal(formatRelativeTime('2026-11-14T19:55:00.000Z', now), '5m ago');
   assert.equal(formatRelativeTime('2026-11-14T17:00:00.000Z', now), '3h ago');
+});
+
+test('researcher notes persist in local history and clear cleanly', () => {
+  const storage = createMemoryStorage();
+  const created = new Date('2026-11-14T19:50:00.000Z');
+  const updated = new Date('2026-11-14T20:05:00.000Z');
+
+  const e1 = buildRecentInvestigationEntry({
+    id: 'run-notes-1',
+    rawInput: '1.2.3.4',
+    normalizedInput: '1.2.3.4',
+    indicators: ['1.2.3.4'],
+    source: 'all',
+    customSources: [],
+    useCustomSources: false,
+    sourceLabels: ['VirusTotal'],
+    mode: 'sample',
+    results: [makeResult({ verdict: 'Malicious' })],
+    invalidTokens: [],
+    quotaSkipped: [],
+    reportFile: null,
+    notes: '  Initial triage: cobalt strike beacon IP  ',
+    now: created,
+  });
+
+  assert.equal(e1.notes, 'Initial triage: cobalt strike beacon IP');
+  assert.equal(e1.notesUpdatedAt, created.toISOString());
+
+  let history = prependRecentInvestigation([], e1);
+  history = updateRecentInvestigationNotes(
+    history,
+    'run-notes-1',
+    'Confirmed C2 exit node\r\nEscalated to Tier-2 SOC',
+    updated,
+  );
+  assert.equal(history[0].notes, 'Confirmed C2 exit node\nEscalated to Tier-2 SOC');
+  assert.equal(history[0].notesUpdatedAt, updated.toISOString());
+
+  saveRecentInvestigations(storage, history);
+  const reloaded = loadRecentInvestigations(storage);
+  assert.equal(reloaded[0].notes, 'Confirmed C2 exit node\nEscalated to Tier-2 SOC');
+  assert.equal(reloaded[0].notesUpdatedAt, updated.toISOString());
+
+  const cleared = updateRecentInvestigationNotes(reloaded, 'run-notes-1', '   ', updated);
+  assert.equal(cleared[0].notes, undefined);
+  assert.equal(cleared[0].notesUpdatedAt, undefined);
+});
+
+test('pinning keeps entries anchored at the top, survives prepend capacity limit, and renames roundtrip', () => {
+  const storage = createMemoryStorage();
+  const baseParams = {
+    source: 'all' as const,
+    customSources: [],
+    useCustomSources: false,
+    sourceLabels: ['VirusTotal'],
+    mode: 'sample' as const,
+    results: [makeResult({ verdict: 'Malicious' })],
+    invalidTokens: [],
+    quotaSkipped: [],
+    reportFile: null,
+  };
+
+  const e1 = buildRecentInvestigationEntry({
+    ...baseParams,
+    id: 'run-a',
+    rawInput: '1.1.1.1',
+    normalizedInput: '1.1.1.1',
+    indicators: ['1.1.1.1'],
+    now: new Date('2026-11-14T19:00:00.000Z'),
+  });
+  const e2 = buildRecentInvestigationEntry({
+    ...baseParams,
+    id: 'run-b',
+    rawInput: '8.8.8.8',
+    normalizedInput: '8.8.8.8',
+    indicators: ['8.8.8.8'],
+    now: new Date('2026-11-14T19:05:00.000Z'),
+  });
+  const e3 = buildRecentInvestigationEntry({
+    ...baseParams,
+    id: 'run-c',
+    rawInput: '9.9.9.9',
+    normalizedInput: '9.9.9.9',
+    indicators: ['9.9.9.9'],
+    now: new Date('2026-11-14T19:10:00.000Z'),
+  });
+
+  let history = prependRecentInvestigation([], e1, 2);
+  history = prependRecentInvestigation(history, e2, 2);
+  // Pin older item run-a -> moves to top
+  history = togglePinRecentInvestigation(history, 'run-a', new Date('2026-11-14T19:15:00.000Z'));
+  assert.equal(history[0].id, 'run-a');
+  assert.equal(history[0].pinned, true);
+
+  // Adding run-c with limit=2 keeps pinned run-a anchored and evicts unpinned run-b
+  history = prependRecentInvestigation(history, e3, 2);
+  assert.deepEqual(
+    history.map((item) => item.id),
+    ['run-a', 'run-c'],
+  );
+
+  // Rename run-a and confirm whitespace normalization & storage roundtrip
+  history = renameRecentInvestigation(history, 'run-a', '   APT29   C2 Beacon   ');
+  assert.equal(getInvestigationDisplayTitle(history[0]), 'APT29 C2 Beacon');
+  saveRecentInvestigations(storage, history);
+  const reloaded = sortRecentInvestigations(loadRecentInvestigations(storage));
+  assert.equal(reloaded[0].pinned, true);
+  assert.equal(reloaded[0].customTitle, 'APT29 C2 Beacon');
+
+  // Blank rename reverts cleanly to IOC summary title, unpin restores normal order
+  const reverted = renameRecentInvestigation(reloaded, 'run-a', '   ');
+  assert.equal(reverted[0].customTitle, undefined);
+  assert.equal(getInvestigationDisplayTitle(reverted[0]), '1.1.1.1');
+
+  const unpinned = togglePinRecentInvestigation(reverted, 'run-a');
+  assert.equal(unpinned.find((x) => x.id === 'run-a')?.pinned, undefined);
 });

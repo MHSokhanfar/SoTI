@@ -49,7 +49,10 @@ import {
   type VerdictFilterOption,
 } from '../utils/reportsAnalytics';
 import { exportReportsDashboardPdf } from '../utils/reportPdf';
+import type { LookupResult } from '../utils/indicators';
 import type { ThemeMode } from '../utils/theme';
+import { IocRegionHeatmap } from './IocRegionHeatmap';
+import { ThreatLandscapeWidget } from './ThreatLandscapeWidget';
 
 type ChartScope = 'malicious_clean' | 'all_verdicts';
 type TrendMode = 'total' | 'severity';
@@ -71,13 +74,21 @@ export interface ReportsNavigationTarget {
 interface ReportsViewProps {
   theme?: ThemeMode;
   navigationTarget?: ReportsNavigationTarget | null;
+  currentResults?: LookupResult[];
 }
 
-export function ReportsView({ theme = 'light', navigationTarget }: ReportsViewProps) {
+export function ReportsView({
+  theme = 'light',
+  navigationTarget,
+  currentResults = [],
+}: ReportsViewProps) {
   const isDark = theme === 'dark';
   const [reports, setReports] = useState<ReportMeta[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [allRunRows, setAllRunRows] = useState<Record<string, string>[]>([]);
+  const [allRunsCount, setAllRunsCount] = useState<number>(0);
+  const [loadingHeatmapRows, setLoadingHeatmapRows] = useState(true);
   const [loadingList, setLoadingList] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
@@ -337,6 +348,17 @@ export function ReportsView({ theme = 'light', navigationTarget }: ReportsViewPr
           setRows(rowsData.rows || []);
         }
       }
+
+      fetch('/api/reports/all-rows')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((allData) => {
+          if (allData && Array.isArray(allData.rows)) {
+            setAllRunRows(allData.rows);
+            setAllRunsCount(Number(allData.reportCount || list.length));
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoadingHeatmapRows(false));
     } finally {
       refreshInFlightRef.current = false;
       setLoadingList(false);
@@ -1008,6 +1030,33 @@ export function ReportsView({ theme = 'light', navigationTarget }: ReportsViewPr
               </div>
             </section>
           </div>
+
+          <ThreatLandscapeWidget
+            allRunRows={allRunRows}
+            selectedRunRows={rows}
+            selectedRunName={selectedName}
+            reportCount={allRunsCount || reports.length}
+            currentResults={currentResults}
+            theme={theme}
+            loading={loadingHeatmapRows}
+            onInspectIndicator={(indicator) => {
+              setVerdictFilter('All');
+              setSearchQuery(indicator);
+            }}
+          />
+
+          <IocRegionHeatmap
+            allRunRows={allRunRows}
+            selectedRunRows={rows}
+            selectedRunName={selectedName}
+            reportCount={allRunsCount || reports.length}
+            theme={theme}
+            loading={loadingHeatmapRows}
+            onInspectIndicator={(indicator) => {
+              setVerdictFilter('All');
+              setSearchQuery(indicator);
+            }}
+          />
 
           <section aria-label="Filter historical reports" className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 print:hidden">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

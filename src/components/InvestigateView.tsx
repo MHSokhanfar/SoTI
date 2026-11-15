@@ -7,11 +7,17 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FileJson,
+  FilePenLine,
   HelpCircle,
+  Layers,
+  Mail,
+  Save,
   Search,
   Settings2,
   ShieldAlert,
   Sparkles,
+  Tag,
   Upload,
   X,
   XCircle,
@@ -19,6 +25,7 @@ import {
 import {
   buildInvestigationCsvFilename,
   preprocessInputForLookup,
+  refangInputPreservingUrls,
   serializeResultsToCsv,
   type LookupResult,
   type SourceSelection,
@@ -29,6 +36,7 @@ import {
   EXTRA_PROVIDER_META,
   getAllEnabledProviderIds,
   type ApiSettings,
+  type BuiltinExtraSourceId,
 } from '../utils/apiConfig';
 import {
   IndicatorFileUpload,
@@ -40,14 +48,49 @@ import {
   buildRecentInvestigationEntry,
   clearRecentInvestigations,
   loadRecentInvestigations,
+  MAX_INVESTIGATION_NOTES_LENGTH,
+  normalizeInvestigationNotes,
   prependRecentInvestigation,
   removeRecentInvestigation,
+  renameRecentInvestigation,
   saveRecentInvestigations,
+  togglePinRecentInvestigation,
+  updateRecentInvestigationNotes,
   type RecentInvestigationEntry,
 } from '../utils/investigationHistory';
+import {
+  addTagToIndicator,
+  collectTagsForIndicators,
+  getTagsForIndicator,
+  loadIndicatorTags,
+  removeTagFromIndicator,
+  saveIndicatorTags,
+  SUGGESTED_IOC_TAGS,
+  syncRecentInvestigationsTags,
+  type IndicatorTagMap,
+} from '../utils/iocTags';
+import {
+  computeAllIocConfidenceScores,
+  type ConfidenceRiskLevel,
+} from '../utils/riskScoring';
 import { formatIocClipboardText, formatIocGroupClipboardText } from '../utils/iocGraph';
+import {
+  BULK_SAMPLE_BATCH,
+  buildUnifiedBatchTable,
+  deduplicateBulkInputLines,
+  filterUnifiedBatchRows,
+  formatUnifiedBatchRowClipboard,
+  summarizeBulkInputStats,
+  type InvestigationAnalysisMode,
+} from '../utils/bulkAnalysis';
+import {
+  buildExportedSessionPayload,
+  buildSessionExportFilename,
+  serializeExportedSessionJson,
+} from '../utils/sessionExport';
 import { copyToClipboard } from '../utils/clipboard';
 import { getQuotaWarningProviders } from '../utils/quota';
+import type { EmailAlertRecord } from '../utils/emailAlerts';
 import type { ThemeMode } from '../utils/theme';
 import type { QuotaState } from '../App';
 
@@ -64,12 +107,17 @@ export interface InvestigationState {
   source: SourceSelection;
   customSources: string[];
   useCustomSources: boolean;
+  includeThreatFox: boolean | null;
+  includeUrlscan: boolean | null;
   mode: 'sample' | 'live';
   results: LookupResult[];
   invalidTokens: string[];
   quotaSkipped: QuotaSkippedEntry[];
   lastReportFile: string | null;
   lastRunMode: 'sample' | 'live' | null;
+  activeHistoryId: string | null;
+  researcherNotes: string;
+  analysisMode: InvestigationAnalysisMode;
 }
 
 export interface InvestigateNavigationTarget {
@@ -81,12 +129,15 @@ export interface InvestigateNavigationTarget {
 interface InvestigateViewProps {
   state: InvestigationState;
   apiSettings: ApiSettings;
+  extraKeyStatus?: Record<BuiltinExtraSourceId, boolean>;
   quota: QuotaState;
   theme?: ThemeMode;
   onChangeState: (updater: (prev: InvestigationState) => InvestigationState) => void;
   onQuotaChange: (next: QuotaState) => void;
   onReportCreated: (reportFile: string) => void;
   onOpenApiConfig: () => void;
+  onEmailAlertTriggered?: (record: EmailAlertRecord) => void;
+  onOpenEmailAlertRules?: () => void;
   navigationTarget?: InvestigateNavigationTarget | null;
   onRecentHistoryChange?: (entries: RecentInvestigationEntry[]) => void;
 }
@@ -167,15 +218,33 @@ function VerdictIndicator({ verdict, status }: { verdict: Verdict; status: Looku
   }
 }
 
+function getConfidenceToneClass(level: ConfidenceRiskLevel): string {
+  switch (level) {
+    case 'Critical':
+      return 'text-red-700 dark:text-red-400';
+    case 'High':
+      return 'text-orange-700 dark:text-orange-400';
+    case 'Medium':
+      return 'text-amber-700 dark:text-amber-400';
+    case 'Low':
+      return 'text-emerald-700 dark:text-emerald-400';
+    default:
+      return 'text-slate-500 dark:text-slate-400';
+  }
+}
+
 export function InvestigateView({
   state,
   apiSettings,
+  extraKeyStatus,
   quota,
   theme = 'light',
   onChangeState,
   onQuotaChange,
   onReportCreated,
   onOpenApiConfig,
+  onEmailAlertTriggered,
+  onOpenEmailAlertRules,
   navigationTarget,
   onRecentHistoryChange,
 }: InvestigateViewProps) {
@@ -183,20 +252,33 @@ export function InvestigateView({
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [dismissedQuotaSignature, setDismissedQuotaSignature] = useState<string | null>(null);
+  const [lastEmailAlert, setLastEmailAlert] = useState<EmailAlertRecord | null>(null);
   const [fileImportSummary, setFileImportSummary] = useState<IndicatorFileSummary | null>(null);
   const [recentHistory, setRecentHistory] = useState<RecentInvestigationEntry[]>(() =>
     typeof window !== 'undefined' ? loadRecentInvestigations(window.localStorage) : [],
   );
-  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [indicatorTags, setIndicatorTags] = useState<IndicatorTagMap>(() =>
+    typeof window !== 'undefined' ? loadIndicatorTags(window.localStorage) : {},
+  );
+  const [taggingIndicator, setTaggingIndicator] = useState<string | null>(null);
+  const [customTagInput, setCustomTagInput] = useState('');
   const [graphFocusedIndicator, setGraphFocusedIndicator] = useState<string | null>(null);
+  const [notesSaveStatus, setNotesSaveStatus] = useState<'idle' | 'saved'>('idle');
+  const [bulkTableStyle, setBulkTableStyle] = useState<'unified' | 'detailed'>('unified');
+  const [sessionExportedFile, setSessionExportedFile] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const sessionExportTimerRef = useRef<number | null>(null);
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
+  const activeHistoryId = state.activeHistoryId;
 
   useEffect(() => {
     return () => {
       if (copyTimerRef.current !== null) {
         window.clearTimeout(copyTimerRef.current);
+      }
+      if (sessionExportTimerRef.current !== null) {
+        window.clearTimeout(sessionExportTimerRef.current);
       }
     };
   }, []);
@@ -207,6 +289,12 @@ export function InvestigateView({
     }
     onRecentHistoryChange?.(recentHistory);
   }, [recentHistory, onRecentHistoryChange]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveIndicatorTags(window.localStorage, indicatorTags);
+    }
+  }, [indicatorTags]);
 
   useEffect(() => {
     if (!navigationTarget) return;
@@ -281,23 +369,45 @@ export function InvestigateView({
     return map;
   }, [quota.providers]);
 
+  const threatfoxChecked =
+    state.includeThreatFox ?? Boolean(apiSettings.extraProviders?.threatfox?.enabled);
+  const urlscanChecked =
+    state.includeUrlscan ?? Boolean(apiSettings.extraProviders?.urlscan?.enabled);
+
+  const isBulkMode = state.analysisMode === 'bulk';
+
+  const bulkStats = useMemo(
+    () => summarizeBulkInputStats(state.rawInput),
+    [state.rawInput],
+  );
+
   const effectiveSources: string[] = useMemo(() => {
+    if (isBulkMode) {
+      return enabledSourceIds;
+    }
     if (state.useCustomSources) {
       return state.customSources;
     }
-    if (state.source === 'all') {
-      return enabledSourceIds;
+    const base =
+      state.source === 'all'
+        ? enabledSourceIds.filter((id) => id !== 'threatfox' && id !== 'urlscan')
+        : [state.source];
+    if (threatfoxChecked && !base.includes('threatfox')) {
+      base.push('threatfox');
     }
-    return [state.source];
-  }, [state.useCustomSources, state.customSources, state.source, enabledSourceIds]);
+    if (urlscanChecked && !base.includes('urlscan')) {
+      base.push('urlscan');
+    }
+    return base;
+  }, [isBulkMode, state.useCustomSources, state.customSources, state.source, enabledSourceIds, threatfoxChecked, urlscanChecked]);
 
   const visibleQuotaSnapshots = useMemo(() => {
-    const ids = new Set(enabledSourceIds);
+    const ids = new Set([...enabledSourceIds, ...effectiveSources]);
     for (const q of quota.providers) {
       if (q.used > 0 || q.exhausted) ids.add(q.providerId);
     }
     return quota.providers.filter((q) => ids.has(q.providerId));
-  }, [quota.providers, enabledSourceIds]);
+  }, [quota.providers, enabledSourceIds, effectiveSources]);
 
   function toggleCustomSource(id: string) {
     onChangeState((prev) => {
@@ -333,6 +443,11 @@ export function InvestigateView({
     return state.results.filter((r) => r.status === 'ok' && r.verdict === verdictFilter);
   }, [state.results, verdictFilter]);
 
+  const confidenceByIndicator = useMemo(
+    () => computeAllIocConfidenceScores(state.results),
+    [state.results],
+  );
+
   const groupedByIndicator = useMemo(() => {
     const groups = new Map<string, { indicator: string; type: string; items: LookupResult[] }>();
     for (const r of filteredResults) {
@@ -346,50 +461,148 @@ export function InvestigateView({
     return Array.from(groups.values());
   }, [filteredResults]);
 
+  const unifiedBatchTable = useMemo(
+    () => buildUnifiedBatchTable(state.results, indicatorTags),
+    [state.results, indicatorTags],
+  );
+
+  const filteredUnifiedBatchRows = useMemo(
+    () => filterUnifiedBatchRows(unifiedBatchTable.rows, verdictFilter),
+    [unifiedBatchTable.rows, verdictFilter],
+  );
+
+  function handleAddTag(indicator: string, rawTag: string) {
+    setIndicatorTags((prev) => {
+      const next = addTagToIndicator(prev, indicator, rawTag);
+      if (next !== prev) {
+        setRecentHistory((histPrev) => syncRecentInvestigationsTags(histPrev, next));
+      }
+      return next;
+    });
+  }
+
+  function handleRemoveTag(indicator: string, tag: string) {
+    setIndicatorTags((prev) => {
+      const next = removeTagFromIndicator(prev, indicator, tag);
+      if (next !== prev) {
+        setRecentHistory((histPrev) => syncRecentInvestigationsTags(histPrev, next));
+      }
+      return next;
+    });
+  }
+
+  const activeHistoryEntry = useMemo(
+    () => (activeHistoryId ? recentHistory.find((e) => e.id === activeHistoryId) ?? null : null),
+    [activeHistoryId, recentHistory],
+  );
+
+  const normalizedDraftNotes = normalizeInvestigationNotes(state.researcherNotes);
+  const normalizedSavedNotes = normalizeInvestigationNotes(activeHistoryEntry?.notes);
+  const hasUnsavedNotes =
+    activeHistoryEntry !== null
+      ? normalizedDraftNotes !== normalizedSavedNotes
+      : normalizedDraftNotes.length > 0;
+
+  function persistNotesToHistory(targetEntryId: string | null, rawNotes: string) {
+    if (!targetEntryId) return;
+    setRecentHistory((prev) => updateRecentInvestigationNotes(prev, targetEntryId, rawNotes));
+    setNotesSaveStatus('saved');
+  }
+
+  useEffect(() => {
+    if (!activeHistoryId || !activeHistoryEntry) return;
+    if (normalizedDraftNotes === normalizedSavedNotes) return;
+    const timer = window.setTimeout(() => {
+      setRecentHistory((prev) =>
+        updateRecentInvestigationNotes(prev, activeHistoryId, state.researcherNotes),
+      );
+      setNotesSaveStatus('saved');
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeHistoryId,
+    activeHistoryEntry,
+    state.researcherNotes,
+    normalizedDraftNotes,
+    normalizedSavedNotes,
+  ]);
+
   async function runEnrichment(override?: {
     rawInput: string;
     source: SourceSelection;
     customSources: string[];
     useCustomSources: boolean;
+    includeThreatFox: boolean | null;
+    includeUrlscan: boolean | null;
     mode: 'sample' | 'live';
+    analysisMode?: InvestigationAnalysisMode;
+    preserveNotes?: string;
   }) {
     setErrorMsg(null);
+    setLastEmailAlert(null);
 
     const targetRawInput = override ? override.rawInput : state.rawInput;
-    const targetSource = override ? override.source : state.source;
+    const targetAnalysisMode: InvestigationAnalysisMode =
+      override?.analysisMode ?? state.analysisMode;
+    const targetIsBulk = targetAnalysisMode === 'bulk';
+    const targetSource = targetIsBulk ? 'all' : (override ? override.source : state.source);
     const targetCustomSources = override ? override.customSources : state.customSources;
-    const targetUseCustomSources = override ? override.useCustomSources : state.useCustomSources;
+    const targetUseCustomSources = targetIsBulk
+      ? false
+      : override
+        ? override.useCustomSources
+        : state.useCustomSources;
+    const targetIncludeThreatFox = override ? override.includeThreatFox : state.includeThreatFox;
+    const targetIncludeUrlscan = override ? override.includeUrlscan : state.includeUrlscan;
     const targetMode = override ? override.mode : state.mode;
-    const targetEffectiveSources = targetUseCustomSources
-      ? targetCustomSources
-      : targetSource === 'all'
-        ? enabledSourceIds
-        : [targetSource];
+
+    const targetTfActive =
+      targetIncludeThreatFox ?? Boolean(apiSettings.extraProviders?.threatfox?.enabled);
+    const targetUrlscanActive =
+      targetIncludeUrlscan ?? Boolean(apiSettings.extraProviders?.urlscan?.enabled);
+
+    const targetEffectiveSources = (() => {
+      if (targetIsBulk) return enabledSourceIds;
+      if (targetUseCustomSources) return targetCustomSources;
+      const base =
+        targetSource === 'all'
+          ? enabledSourceIds.filter((id) => id !== 'threatfox' && id !== 'urlscan')
+          : [targetSource];
+      if (targetTfActive && !base.includes('threatfox')) base.push('threatfox');
+      if (targetUrlscanActive && !base.includes('urlscan')) base.push('urlscan');
+      return base;
+    })();
 
     if (!targetRawInput.trim()) {
-      setErrorMsg('Enter at least one IP, domain, or file hash (MD5, SHA1, or SHA256).');
+      setErrorMsg('Enter at least one IP, domain, URL, or file hash (MD5, SHA1, or SHA256).');
       return;
     }
 
     if (targetEffectiveSources.length === 0) {
-      setErrorMsg('Select at least one intelligence API to run enrichment.');
+      setErrorMsg(
+        targetIsBulk
+          ? 'No intelligence APIs are enabled. Enable at least one API in CLI & APIs settings.'
+          : 'Select at least one intelligence API to run enrichment.',
+      );
       return;
     }
 
-    // Automatically detect & strip common defang patterns before sending to API providers
+    // Strip common defang patterns before API dispatch while preserving full URLs for URLScan
     const targetPreprocessed = preprocessInputForLookup(targetRawInput);
-    const dispatchRaw = targetPreprocessed.apiReadyInput || targetRawInput.trim();
+    const dispatchRaw =
+      refangInputPreservingUrls(targetRawInput) ||
+      targetPreprocessed.apiReadyInput ||
+      targetRawInput.trim();
 
     setLoading(true);
     try {
       const payload: Record<string, unknown> = {
         raw: dispatchRaw,
         source: targetSource,
+        sources: targetEffectiveSources,
         mode: targetMode,
+        parallel: targetIsBulk,
       };
-      if (targetUseCustomSources) {
-        payload.sources = targetCustomSources;
-      }
       const resp = await fetch('/api/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -412,41 +625,65 @@ export function InvestigateView({
       const nextReportFile: string | null = data.reportFile || null;
       const resolvedMode: 'sample' | 'live' = data.mode || targetMode;
 
-      onChangeState((prev) => ({
-        ...prev,
-        rawInput: targetRawInput,
-        source: targetSource,
-        customSources: targetCustomSources,
-        useCustomSources: targetUseCustomSources,
-        mode: targetMode,
-        results: nextResults,
-        invalidTokens: nextInvalid,
-        quotaSkipped: nextQuotaSkipped,
-        lastReportFile: nextReportFile,
-        lastRunMode: resolvedMode,
-      }));
-      if (data.quota?.date && Array.isArray(data.quota?.providers)) {
-        onQuotaChange(data.quota);
-      }
-      setVerdictFilter('All');
-      setGraphFocusedIndicator(null);
+      const initialRunNotes =
+        override?.preserveNotes !== undefined
+          ? override.preserveNotes
+          : state.activeHistoryId === null
+            ? state.researcherNotes
+            : '';
 
+      const batchIndicators = targetPreprocessed.validIndicators.map((v) => v.cleaned);
       const entry = buildRecentInvestigationEntry({
         rawInput: targetRawInput,
-        normalizedInput: dispatchRaw,
-        indicators: targetPreprocessed.validIndicators.map((v) => v.cleaned),
+        normalizedInput: targetPreprocessed.apiReadyInput || dispatchRaw,
+        indicators: batchIndicators,
         source: targetSource,
         customSources: targetCustomSources,
         useCustomSources: targetUseCustomSources,
+        includeThreatFox: targetIncludeThreatFox,
+        includeUrlscan: targetIncludeUrlscan,
         sourceLabels: targetEffectiveSources.map((id) => providerNameMap[id] || id),
         mode: resolvedMode,
         results: nextResults,
         invalidTokens: nextInvalid,
         quotaSkipped: nextQuotaSkipped,
         reportFile: nextReportFile,
+        tags: collectTagsForIndicators(indicatorTags, batchIndicators),
+        notes: initialRunNotes,
       });
+
+      onChangeState((prev) => ({
+        ...prev,
+        rawInput: targetRawInput,
+        source: targetSource,
+        customSources: targetCustomSources,
+        useCustomSources: targetUseCustomSources,
+        includeThreatFox: targetIncludeThreatFox,
+        includeUrlscan: targetIncludeUrlscan,
+        mode: targetMode,
+        results: nextResults,
+        invalidTokens: nextInvalid,
+        quotaSkipped: nextQuotaSkipped,
+        lastReportFile: nextReportFile,
+        lastRunMode: resolvedMode,
+        activeHistoryId: entry.id,
+        researcherNotes: entry.notes ?? '',
+      }));
+      if (data.quota?.date && Array.isArray(data.quota?.providers)) {
+        onQuotaChange(data.quota);
+      }
+      setVerdictFilter('All');
+      setGraphFocusedIndicator(null);
+      setTaggingIndicator(null);
+      setCustomTagInput('');
+      setNotesSaveStatus(entry.notes ? 'saved' : 'idle');
+
       setRecentHistory((prev) => prependRecentInvestigation(prev, entry));
-      setActiveHistoryId(entry.id);
+
+      if (data.emailAlert?.triggered && data.emailAlert?.record) {
+        setLastEmailAlert(data.emailAlert.record);
+        onEmailAlertTriggered?.(data.emailAlert.record);
+      }
 
       if (nextReportFile) {
         onReportCreated(nextReportFile);
@@ -466,52 +703,76 @@ export function InvestigateView({
   function handleViewRecentDetails(entry: RecentInvestigationEntry) {
     setErrorMsg(null);
     setFileImportSummary(null);
-    setActiveHistoryId(entry.id);
     setVerdictFilter('All');
     setGraphFocusedIndicator(null);
+    setNotesSaveStatus(entry.notes ? 'saved' : 'idle');
     onChangeState((prev) => ({
       ...prev,
       rawInput: entry.rawInput,
       source: entry.source,
       customSources: entry.customSources,
       useCustomSources: entry.useCustomSources,
+      includeThreatFox: entry.includeThreatFox ?? null,
+      includeUrlscan: entry.includeUrlscan ?? null,
       mode: entry.mode,
       results: entry.results,
       invalidTokens: entry.invalidTokens,
       quotaSkipped: entry.quotaSkipped,
       lastReportFile: entry.reportFile,
       lastRunMode: entry.mode,
+      activeHistoryId: entry.id,
+      researcherNotes: entry.notes ?? '',
     }));
   }
 
   async function handleRerunRecent(entry: RecentInvestigationEntry) {
     setFileImportSummary(null);
-    setActiveHistoryId(entry.id);
+    const nextIncludeThreatFox = entry.includeThreatFox ?? null;
+    const nextIncludeUrlscan = entry.includeUrlscan ?? null;
     onChangeState((prev) => ({
       ...prev,
       rawInput: entry.rawInput,
       source: entry.source,
       customSources: entry.customSources,
       useCustomSources: entry.useCustomSources,
+      includeThreatFox: nextIncludeThreatFox,
+      includeUrlscan: nextIncludeUrlscan,
       mode: entry.mode,
+      activeHistoryId: entry.id,
+      researcherNotes: entry.notes ?? '',
     }));
     await runEnrichment({
       rawInput: entry.rawInput,
       source: entry.source,
       customSources: entry.customSources,
       useCustomSources: entry.useCustomSources,
+      includeThreatFox: nextIncludeThreatFox,
+      includeUrlscan: nextIncludeUrlscan,
       mode: entry.mode,
+      preserveNotes: entry.notes ?? '',
     });
+  }
+
+  function handleTogglePinRecent(id: string) {
+    setRecentHistory((prev) => togglePinRecentInvestigation(prev, id));
+  }
+
+  function handleRenameRecent(id: string, nextTitle: string) {
+    setRecentHistory((prev) => renameRecentInvestigation(prev, id, nextTitle));
   }
 
   function handleRemoveRecent(id: string) {
     setRecentHistory((prev) => removeRecentInvestigation(prev, id));
-    setActiveHistoryId((prev) => (prev === id ? null : prev));
+    if (activeHistoryId === id) {
+      onChangeState((prev) => ({ ...prev, activeHistoryId: null, researcherNotes: '' }));
+      setNotesSaveStatus('idle');
+    }
   }
 
   function handleClearRecent() {
     setRecentHistory([]);
-    setActiveHistoryId(null);
+    onChangeState((prev) => ({ ...prev, activeHistoryId: null }));
+    setNotesSaveStatus('idle');
     if (typeof window !== 'undefined') {
       clearRecentInvestigations(window.localStorage);
     }
@@ -530,6 +791,71 @@ export function InvestigateView({
     link.click();
     document.body.removeChild(link);
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function handleExportFullSession() {
+    const payload = buildExportedSessionPayload({
+      sessionId: activeHistoryId,
+      analysisMode: state.analysisMode,
+      executionMode: state.mode,
+      lastRunMode: state.lastRunMode,
+      reportFile: state.lastReportFile,
+      rawInput: state.rawInput,
+      invalidTokens: state.invalidTokens,
+      sourceSelection: state.source,
+      effectiveSources,
+      customSources: state.customSources,
+      useCustomSources: state.useCustomSources,
+      includeThreatFox: state.includeThreatFox,
+      includeUrlscan: state.includeUrlscan,
+      quotaSkipped: state.quotaSkipped,
+      results: state.results,
+      indicatorTags,
+      researcherNotes: state.researcherNotes,
+      notesUpdatedAt: activeHistoryEntry?.notesUpdatedAt ?? null,
+    });
+
+    const jsonText = serializeExportedSessionJson(payload);
+    const filename = buildSessionExportFilename();
+    const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    setSessionExportedFile(filename);
+    if (sessionExportTimerRef.current !== null) {
+      window.clearTimeout(sessionExportTimerRef.current);
+    }
+    sessionExportTimerRef.current = window.setTimeout(() => setSessionExportedFile(null), 3500);
+  }
+
+  function handleSwitchAnalysisMode(nextMode: InvestigationAnalysisMode) {
+    setErrorMsg(null);
+    if (nextMode === 'bulk') {
+      setBulkTableStyle('unified');
+      onChangeState((prev) => ({
+        ...prev,
+        analysisMode: 'bulk',
+        rawInput:
+          prev.rawInput.trim() === SAMPLE_BATCH && prev.results.length === 0
+            ? BULK_SAMPLE_BATCH
+            : prev.rawInput,
+      }));
+    } else {
+      onChangeState((prev) => ({
+        ...prev,
+        analysisMode: 'standard',
+        rawInput:
+          prev.rawInput.trim() === BULK_SAMPLE_BATCH && prev.results.length === 0
+            ? SAMPLE_BATCH
+            : prev.rawInput,
+      }));
+    }
   }
 
   async function triggerClipboardCopy(text: string, key: string) {
@@ -602,7 +928,35 @@ export function InvestigateView({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0 max-w-full">
+            <div className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-slate-800 p-1" role="group" aria-label="Investigation workflow mode">
+              <button
+                type="button"
+                data-testid="investigate-mode-standard"
+                onClick={() => handleSwitchAnalysisMode('standard')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  !isBulkMode
+                    ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                }`}
+              >
+                Standard
+              </button>
+              <button
+                type="button"
+                data-testid="investigate-mode-bulk"
+                onClick={() => handleSwitchAnalysisMode('bulk')}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  isBulkMode
+                    ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                }`}
+              >
+                <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                Bulk Analysis
+              </button>
+            </div>
+
             <div className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-slate-800 p-1" role="group" aria-label="Execution mode">
               <button
                 type="button"
@@ -679,10 +1033,12 @@ export function InvestigateView({
           <div>
             <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
               <label htmlFor="ioc-input" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Indicators (comma, space, newline, or semicolon separated)
+                {isBulkMode
+                  ? 'Bulk Indicator List — IPs, domains, URLs, or hashes (one per line or comma-separated)'
+                  : 'Indicators — IP, domain, URL, or hash'}
               </label>
 
-              <div className="flex flex-wrap items-center gap-3 shrink-0">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 min-w-0 max-w-full">
                 {preprocessedInput.detectedPatterns.length > 0 && (
                   <button
                     type="button"
@@ -691,7 +1047,9 @@ export function InvestigateView({
                       if (preprocessedInput.apiReadyInput) {
                         onChangeState((prev) => ({
                           ...prev,
-                          rawInput: preprocessedInput.apiReadyInput,
+                          rawInput: isBulkMode
+                            ? deduplicateBulkInputLines(prev.rawInput)
+                            : preprocessedInput.apiReadyInput,
                         }));
                       }
                     }}
@@ -699,6 +1057,19 @@ export function InvestigateView({
                   >
                     <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                     Strip defangs
+                  </button>
+                )}
+                {isBulkMode && (
+                  <button
+                    type="button"
+                    data-testid="bulk-dedup-button"
+                    onClick={() => {
+                      const cleaned = deduplicateBulkInputLines(state.rawInput);
+                      onChangeState((prev) => ({ ...prev, rawInput: cleaned }));
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Clean &amp; Deduplicate
                   </button>
                 )}
                 <button
@@ -713,25 +1084,73 @@ export function InvestigateView({
                 <button
                   type="button"
                   onClick={() => {
-                    onChangeState((prev) => ({ ...prev, rawInput: SAMPLE_BATCH }));
+                    onChangeState((prev) => ({
+                      ...prev,
+                      rawInput: isBulkMode ? BULK_SAMPLE_BATCH : SAMPLE_BATCH,
+                    }));
                     setFileImportSummary(null);
                     setErrorMsg(null);
                   }}
                   className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100 whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <ClipboardList className="h-3.5 w-3.5" aria-hidden="true" />
-                  Load Sample IOCs
+                  {isBulkMode ? 'Load Bulk Sample' : 'Load Sample IOCs'}
                 </button>
+                {isBulkMode && state.rawInput.trim().length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="bulk-clear-button"
+                    onClick={() => onChangeState((prev) => ({ ...prev, rawInput: '' }))}
+                    className="text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
               </div>
             </div>
             <textarea
               id="ioc-input"
-              rows={3}
+              data-testid={isBulkMode ? 'bulk-ioc-textarea' : 'standard-ioc-textarea'}
+              rows={isBulkMode ? 6 : 3}
               value={state.rawInput}
               onChange={(e) => onChangeState((prev) => ({ ...prev, rawInput: e.target.value }))}
-              placeholder="e.g. 1[.]2[.]3[.]4, hxxp://evil[.]com, 44d88612fea8a8f36de82e1278abb02f"
+              placeholder={
+                isBulkMode
+                  ? 'Paste a list of indicators (one per line or comma-separated):\n1[.]2[.]3[.]4\n8.8.8.8\nhxxp://evil[.]com/login\n44d88612fea8a8f36de82e1278abb02f'
+                  : 'e.g. 1[.]2[.]3[.]4, hxxp://evil[.]com, 44d88612fea8a8f36de82e1278abb02f'
+              }
               className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/70 px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
             />
+            {isBulkMode && (
+              <div
+                data-testid="bulk-input-stats"
+                className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400"
+              >
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums">
+                  <span className="font-sans font-medium text-slate-700 dark:text-slate-300">
+                    Batch Breakdown:
+                  </span>
+                  <span>{bulkStats.totalValid} valid</span>
+                  <span>·</span>
+                  <span>{bulkStats.ipCount} IP</span>
+                  <span>·</span>
+                  <span>{bulkStats.domainCount} Domain</span>
+                  <span>·</span>
+                  <span>{bulkStats.hashCount} Hash</span>
+                  {bulkStats.invalidCount > 0 && (
+                    <>
+                      <span>·</span>
+                      <span className="text-red-600 dark:text-red-400">
+                        {bulkStats.invalidCount} invalid skipped
+                      </span>
+                    </>
+                  )}
+                </div>
+                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                  {effectiveSources.length} enabled provider{effectiveSources.length === 1 ? '' : 's'} × {bulkStats.totalValid} IOC{bulkStats.totalValid === 1 ? '' : 's'} = {effectiveSources.length * bulkStats.totalValid} simultaneous lookups
+                </span>
+              </div>
+            )}
           </div>
 
           <IndicatorFileUpload
@@ -747,8 +1166,8 @@ export function InvestigateView({
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-slate-600 dark:text-slate-400">
                 <span className="font-medium text-slate-500 dark:text-slate-400">Detected ({parsedPreview.length}):</span>
                 {parsedPreview.slice(0, 12).map((item, idx) => (
-                  <span key={`${item.cleaned}-${idx}`} className="inline-flex items-center gap-1.5 font-mono">
-                    <span className={item.type ? 'text-slate-900 dark:text-slate-100' : 'text-red-600 dark:text-red-400 line-through'}>
+                  <span key={`${item.cleaned}-${idx}`} className="inline-flex flex-wrap items-center gap-1.5 font-mono max-w-full">
+                    <span className={`break-all ${item.type ? 'text-slate-900 dark:text-slate-100' : 'text-red-600 dark:text-red-400 line-through'}`}>
                       {item.cleaned}
                     </span>
                     <span className="text-slate-400 dark:text-slate-600">/</span>
@@ -777,115 +1196,219 @@ export function InvestigateView({
             </div>
           )}
 
-          <div className="space-y-3 border-t border-slate-100 dark:border-slate-800 pt-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex flex-wrap items-center gap-2">
+          {isBulkMode ? (
+            <div className="space-y-3 border-t border-slate-100 dark:border-slate-800 pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div
-                  className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 sm:inline-flex sm:flex-wrap sm:items-center"
-                  role="group"
-                  aria-label="Intelligence source"
+                  data-testid="bulk-simultaneous-providers"
+                  className="min-w-0 space-y-1"
                 >
-                  {SOURCE_OPTIONS.map((opt) => {
-                    const isActive = !state.useCustomSources && state.source === opt.id;
-                    const isDisabledInSettings =
-                      opt.id !== 'all' && !apiSettings.providers[opt.id].enabled;
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() =>
-                          onChangeState((prev) => ({
-                            ...prev,
-                            useCustomSources: false,
-                            source: opt.id,
-                          }))
-                        }
-                        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                          isActive
-                            ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
-                            : isDisabledInSettings
-                              ? 'text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-                              : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
-                        }`}
-                      >
-                        {opt.label}
-                        {opt.id === 'all' ? ` (${enabledSourceIds.length})` : ''}
-                      </button>
-                    );
-                  })}
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      Simultaneous Execution ({enabledSourceIds.length} enabled providers):
+                    </span>
+                    <span className="font-mono text-slate-600 dark:text-slate-300">
+                      {enabledSourceIds.length > 0
+                        ? enabledSourceIds.map((id) => providerNameMap[id] || id).join(' · ')
+                        : 'No providers enabled'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    All enabled threat intelligence APIs run concurrently per indicator and consolidate into a unified batch table.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() =>
-                      onChangeState((prev) => ({
-                        ...prev,
-                        useCustomSources: true,
-                        customSources:
-                          prev.customSources.length > 0 ? prev.customSources : [...enabledSourceIds],
-                      }))
-                    }
-                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      state.useCustomSources
-                        ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
-                        : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
-                    }`}
+                    onClick={onOpenApiConfig}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Custom
+                    <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    Configure APIs
+                  </button>
+
+                  <button
+                    type="submit"
+                    data-testid="run-bulk-analysis-button"
+                    disabled={loading}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+                  >
+                    <Layers className="h-4 w-4" aria-hidden="true" />
+                    {loading ? 'Analyzing Batch...' : 'Run Bulk Analysis'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3 border-t border-slate-100 dark:border-slate-800 pt-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 sm:inline-flex sm:flex-wrap sm:items-center"
+                    role="group"
+                    aria-label="Intelligence source"
+                  >
+                    {SOURCE_OPTIONS.map((opt) => {
+                      const isActive = !state.useCustomSources && state.source === opt.id;
+                      const isDisabledInSettings =
+                        opt.id !== 'all' && !apiSettings.providers[opt.id].enabled;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() =>
+                            onChangeState((prev) => ({
+                              ...prev,
+                              useCustomSources: false,
+                              source: opt.id,
+                            }))
+                          }
+                          className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            isActive
+                              ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                              : isDisabledInSettings
+                                ? 'text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
+                                : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                          }`}
+                        >
+                          {opt.label}
+                          {opt.id === 'all' ? ` (${effectiveSources.length})` : ''}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChangeState((prev) => ({
+                          ...prev,
+                          useCustomSources: true,
+                          customSources:
+                            prev.customSources.length > 0 ? prev.customSources : [...effectiveSources],
+                        }))
+                      }
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        state.useCustomSources
+                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                      }`}
+                    >
+                      Custom
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={onOpenApiConfig}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    Configure APIs
                   </button>
                 </div>
 
                 <button
-                  type="button"
-                  onClick={onOpenApiConfig}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                  type="submit"
+                  disabled={loading}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
                 >
-                  <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
-                  Configure APIs
+                  <Search className="h-4 w-4" aria-hidden="true" />
+                  {loading ? 'Enriching...' : 'Run Enrichment'}
                 </button>
               </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
-              >
-                <Search className="h-4 w-4" aria-hidden="true" />
-                {loading ? 'Enriching...' : 'Run Enrichment'}
-              </button>
-            </div>
+              {!state.useCustomSources && (
+                <div
+                  className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-700 dark:text-slate-300"
+                  role="group"
+                  aria-label="Additional enrichment providers"
+                >
+                  <span className="font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                    Additional Providers:
+                  </span>
 
-            {state.useCustomSources ? (
-              <div className="flex flex-wrap items-center gap-4 text-xs text-slate-700 dark:text-slate-300" role="group" aria-label="Custom API selection">
-                <span className="font-medium text-slate-500 dark:text-slate-400">Select APIs:</span>
-                {allKnownProviders.map((prov) => {
-                  const checked = state.customSources.includes(prov.id);
-                  const q = quotaById.get(prov.id);
-                  return (
-                    <label key={prov.id} className="inline-flex items-center gap-2 font-medium text-slate-800 dark:text-slate-200 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleCustomSource(prov.id)}
-                        className="h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600 text-red-600 focus:ring-red-600"
-                      />
-                      <span>{prov.name}</span>
-                      {q?.exhausted && (
-                        <span className="font-mono text-[11px] text-red-700 dark:text-red-400">(quota reached)</span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <span>Active APIs:</span>
-                <span className="font-mono text-slate-700 dark:text-slate-300">
-                  {effectiveSources.length > 0
-                    ? effectiveSources.map((id) => providerNameMap[id] || id).join(' · ')
-                    : 'None enabled'}
-                </span>
-              </div>
-            )}
-          </div>
+                  <label
+                    htmlFor="investigate-toggle-threatfox"
+                    className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 max-w-full font-medium text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <input
+                      id="investigate-toggle-threatfox"
+                      type="checkbox"
+                      data-testid="toggle-threatfox"
+                      checked={threatfoxChecked}
+                      onChange={(e) =>
+                        onChangeState((prev) => ({
+                          ...prev,
+                          includeThreatFox: e.target.checked,
+                        }))
+                      }
+                      className="h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600 text-red-600 focus:ring-red-600 shrink-0"
+                    />
+                    <span>ThreatFox</span>
+                    <span className="font-mono text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                      THREATFOX_AUTH_KEY · {extraKeyStatus?.threatfox ? 'ready' : 'not set'}
+                    </span>
+                  </label>
+
+                  <label
+                    htmlFor="investigate-toggle-urlscan"
+                    className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 max-w-full font-medium text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <input
+                      id="investigate-toggle-urlscan"
+                      type="checkbox"
+                      data-testid="toggle-urlscan"
+                      checked={urlscanChecked}
+                      onChange={(e) =>
+                        onChangeState((prev) => ({
+                          ...prev,
+                          includeUrlscan: e.target.checked,
+                        }))
+                      }
+                      className="h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600 text-red-600 focus:ring-red-600 shrink-0"
+                    />
+                    <span>URLScan</span>
+                    <span className="font-mono text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                      Domain &amp; URL · URLSCAN_API_KEY · {extraKeyStatus?.urlscan ? 'ready' : 'not set'}
+                    </span>
+                  </label>
+                </div>
+              )}
+
+              {state.useCustomSources ? (
+                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-700 dark:text-slate-300" role="group" aria-label="Custom API selection">
+                  <span className="font-medium text-slate-500 dark:text-slate-400">Select APIs:</span>
+                  {allKnownProviders.map((prov) => {
+                    const checked = state.customSources.includes(prov.id);
+                    const q = quotaById.get(prov.id);
+                    return (
+                      <label key={prov.id} className="inline-flex items-center gap-2 font-medium text-slate-800 dark:text-slate-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleCustomSource(prov.id)}
+                          className="h-3.5 w-3.5 rounded border-slate-300 dark:border-slate-600 text-red-600 focus:ring-red-600"
+                        />
+                        <span>{prov.name}</span>
+                        {q?.exhausted && (
+                          <span className="font-mono text-[11px] text-red-700 dark:text-red-400">(quota reached)</span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <span>Active APIs:</span>
+                  <span data-testid="active-apis-summary" className="font-mono text-slate-700 dark:text-slate-300">
+                    {effectiveSources.length > 0
+                      ? effectiveSources.map((id) => providerNameMap[id] || id).join(' · ')
+                      : 'None enabled'}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </form>
 
         {errorMsg && (
@@ -922,23 +1445,146 @@ export function InvestigateView({
             Skipped invalid indicator(s): <span className="font-mono">{state.invalidTokens.join(', ')}</span>
           </div>
         )}
+
+        {lastEmailAlert && !errorMsg && (
+          <div
+            role="status"
+            data-testid="investigate-email-alert-banner"
+            className="mt-4 flex flex-col gap-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/80 dark:bg-red-950/35 px-4 py-3 text-xs text-red-950 dark:text-red-100 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="flex items-start gap-2.5 min-w-0">
+              <Mail className="mt-0.5 h-4 w-4 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="font-semibold">
+                  Threshold Email Alert Dispatched ({lastEmailAlert.deliveryStatus === 'sent' ? 'SMTP Sent' : 'Outbox Queued'})
+                </p>
+                <p className="mt-0.5 text-red-900 dark:text-red-200/90">
+                  Sent to <span className="font-mono">{lastEmailAlert.recipients.join(', ')}</span> for{' '}
+                  <span className="font-mono font-medium">
+                    {lastEmailAlert.triggeredIndicators
+                      .map((t) => `${t.indicator} (${t.confidenceScore}/100 ${t.riskLevel})`)
+                      .join(', ')}
+                  </span>
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {onOpenEmailAlertRules && (
+                <button
+                  type="button"
+                  data-testid="open-email-rules-from-banner"
+                  onClick={onOpenEmailAlertRules}
+                  className="rounded-lg border border-red-300 dark:border-red-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-red-900 dark:text-red-200 hover:bg-red-100 dark:hover:bg-red-900/40 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  View Email Outbox
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setLastEmailAlert(null)}
+                aria-label="Dismiss threshold email alert confirmation"
+                className="rounded-md p-1 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/50 cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {state.results.length > 0 ? (
         <section className="space-y-6">
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-            <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-800 px-5 py-4 lg:flex-row lg:items-center lg:justify-between md:px-6">
-              <div className="min-w-0">
-                <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">Summary Matrix</h2>
-                <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
-                  {state.results.length} lookup{state.results.length === 1 ? '' : 's'}
-                  {state.lastRunMode ? ` · ${state.lastRunMode === 'sample' ? 'Sample Data' : 'Live API'}` : ''}
-                  {state.lastReportFile ? ` · Saved to reports/${state.lastReportFile}` : ''}
-                </p>
+            <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-800 px-5 py-4 md:px-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">
+                      {isBulkMode && bulkTableStyle === 'unified'
+                        ? 'Unified Batch Results'
+                        : 'Summary Matrix'}
+                    </h2>
+                    {sessionExportedFile && (
+                      <span
+                        data-testid="session-export-confirmation"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-400"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        <span>Exported {sessionExportedFile}</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums break-words">
+                    {isBulkMode
+                      ? `${unifiedBatchTable.summary.totalIndicators} unique IOCs · ${unifiedBatchTable.summary.maliciousCount} malicious · ${unifiedBatchTable.summary.suspiciousCount} suspicious · ${unifiedBatchTable.summary.cleanCount} clean · ${state.results.length} total lookups`
+                      : `${state.results.length} lookup${state.results.length === 1 ? '' : 's'}${state.lastRunMode ? ` · ${state.lastRunMode === 'sample' ? 'Sample Data' : 'Live API'}` : ''}${state.lastReportFile ? ` · Saved to reports/${state.lastReportFile}` : ''}`}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full sm:shrink-0">
+                  <button
+                    type="button"
+                    data-testid="export-results-csv-button"
+                    disabled={filteredResults.length === 0}
+                    onClick={handleExportResultsCsv}
+                    aria-label="Export current investigation results to CSV"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    Export to CSV
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="export-full-session-button"
+                    onClick={handleExportFullSession}
+                    aria-label="Export full investigation session as JSON"
+                    title="Download complete portable JSON session (input, provider results, researcher notes, and tags)"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 px-3 py-1.5 text-xs font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                  >
+                    <FileJson className="h-3.5 w-3.5" aria-hidden="true" />
+                    Export Full Session
+                  </button>
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5 sm:flex-nowrap shrink-0">
-                <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1" role="group" aria-label="Filter by verdict">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                {isBulkMode ? (
+                  <div
+                    className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-slate-800 p-1 max-w-full"
+                    role="group"
+                    aria-label="Bulk table presentation"
+                  >
+                    <button
+                      type="button"
+                      data-testid="bulk-view-unified-btn"
+                      onClick={() => setBulkTableStyle('unified')}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        bulkTableStyle === 'unified'
+                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      Unified Batch
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="bulk-view-detailed-btn"
+                      onClick={() => setBulkTableStyle('detailed')}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        bulkTableStyle === 'detailed'
+                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      Detailed Rows
+                    </button>
+                  </div>
+                ) : (
+                  <div />
+                )}
+
+                <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 min-w-0 max-w-full" role="group" aria-label="Filter by verdict">
                   {VERDICT_FILTERS.map((v) => (
                     <button
                       key={v}
@@ -954,62 +1600,237 @@ export function InvestigateView({
                     </button>
                   ))}
                 </div>
-
-                <button
-                  type="button"
-                  data-testid="export-results-csv-button"
-                  disabled={filteredResults.length === 0}
-                  onClick={handleExportResultsCsv}
-                  aria-label="Export current investigation results to CSV"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
-                >
-                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                  Export to CSV
-                </button>
               </div>
             </div>
 
+            {isBulkMode && bulkTableStyle === 'unified' ? (
+              <div className="overflow-x-auto">
+                <table
+                  data-testid="bulk-batch-results-table"
+                  className="w-full text-left text-sm"
+                >
+                  <thead>
+                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      <th className="pl-4 pr-2.5 py-3">Indicator</th>
+                      <th className="px-2.5 py-3">Type</th>
+                      <th className="px-2.5 py-3">Overall Verdict</th>
+                      <th className="px-2.5 py-3 text-right whitespace-nowrap">Confidence</th>
+                      {unifiedBatchTable.providerColumns.map((col) => (
+                        <th key={col.sourceId} className="px-2.5 py-3 whitespace-nowrap">
+                          {col.source}
+                        </th>
+                      ))}
+                      <th className="px-2.5 py-3 text-right whitespace-nowrap">Hits</th>
+                      <th className="pl-2.5 pr-4 py-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {filteredUnifiedBatchRows.map((row) => {
+                      const batchRowKey = `batch:${row.indicator}`;
+                      const isBatchCopied = copiedKey === batchRowKey;
+                      const confTone = getConfidenceToneClass(row.riskLevel);
+                      return (
+                        <tr
+                          key={batchRowKey}
+                          data-testid="bulk-batch-row"
+                          className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
+                        >
+                          <td className="pl-4 pr-2.5 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
+                            <div className="break-all">{row.indicator}</div>
+                            {row.tags.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1 font-sans">
+                                {row.tags.map((tag) => (
+                                  <span
+                                    key={tag}
+                                    className="whitespace-nowrap rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300"
+                                  >
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-2.5 py-3 font-mono text-xs uppercase text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                            {row.type}
+                          </td>
+                          <td className="px-2.5 py-3 whitespace-nowrap">
+                            <VerdictIndicator verdict={row.overallVerdict} status="ok" />
+                          </td>
+                          <td
+                            className="px-2.5 py-3 text-right whitespace-nowrap"
+                            title={row.confidenceExplanation || 'No active scores'}
+                          >
+                            {row.confidenceScore !== null ? (
+                              <div className="inline-flex items-baseline gap-1 font-mono text-xs tabular-nums">
+                                <span className={`font-semibold ${confTone}`}>
+                                  {row.confidenceScore}/100
+                                </span>
+                                <span className="font-sans text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                  {row.riskLevel}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="font-mono text-xs text-slate-400 dark:text-slate-500">—</span>
+                            )}
+                          </td>
+                          {unifiedBatchTable.providerColumns.map((col) => {
+                            const cell = row.providerCells[col.sourceId];
+                            if (!cell) {
+                              return (
+                                <td
+                                  key={col.sourceId}
+                                  className="px-2.5 py-3 font-mono text-xs text-slate-400 dark:text-slate-500 whitespace-nowrap"
+                                >
+                                  —
+                                </td>
+                              );
+                            }
+                            return (
+                              <td
+                                key={col.sourceId}
+                                className="px-2.5 py-3 whitespace-nowrap"
+                                title={cell.summary}
+                              >
+                                <div className="space-y-0.5">
+                                  <VerdictIndicator verdict={cell.verdict} status={cell.status} />
+                                  {cell.score && cell.score !== 'N/A' && (
+                                    <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                                      {cell.score}
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            );
+                          })}
+                          <td className="px-2.5 py-3 text-right font-mono text-xs text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
+                            {row.maliciousHits + row.suspiciousHits}/{row.respondedCount}
+                          </td>
+                          <td className="pl-2.5 pr-4 py-3 text-right whitespace-nowrap">
+                            <button
+                              type="button"
+                              data-testid="copy-ioc-button"
+                              onClick={() =>
+                                triggerClipboardCopy(
+                                  formatUnifiedBatchRowClipboard(
+                                    row,
+                                    unifiedBatchTable.providerColumns,
+                                  ),
+                                  batchRowKey,
+                                )
+                              }
+                              aria-label={`Copy unified batch summary for ${row.indicator}`}
+                              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                isBatchCopied
+                                  ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
+                                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700'
+                              }`}
+                            >
+                              {isBatchCopied ? (
+                                <>
+                                  <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                  Copied
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                  Copy
+                                </>
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {filteredUnifiedBatchRows.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={6 + unifiedBatchTable.providerColumns.length}
+                          className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400"
+                        >
+                          No indicators match the selected verdict filter.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                    <th className="px-6 py-3">Indicator</th>
-                    <th className="px-4 py-3">Type</th>
-                    <th className="px-4 py-3">Source</th>
-                    <th className="px-4 py-3">Verdict</th>
-                    <th className="px-4 py-3 text-right">Score</th>
-                    <th className="px-4 py-3">Summary</th>
-                    <th className="px-6 py-3 text-right">Actions</th>
+                    <th className="pl-4 pr-2.5 py-3">Indicator</th>
+                    <th className="px-2.5 py-3">Type</th>
+                    <th className="px-2.5 py-3">Source</th>
+                    <th className="px-2.5 py-3">Verdict</th>
+                    <th className="px-2.5 py-3 text-right whitespace-nowrap" title="Weighted Confidence Score">
+                      Confidence Score
+                    </th>
+                    <th className="px-2.5 py-3 text-right">Score</th>
+                    <th className="px-2.5 py-3">Summary</th>
+                    <th className="pl-2.5 pr-4 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {filteredResults.map((r, i) => {
                     const rowKey = `row:${r.indicator}:${r.sourceId}:${i}`;
                     const isCopied = copiedKey === rowKey;
+                    const confidence = confidenceByIndicator.get(r.indicator.trim().toLowerCase());
+                    const rowTags = getTagsForIndicator(indicatorTags, r.indicator);
+                    const confTone = getConfidenceToneClass(confidence?.riskLevel ?? 'Unknown');
                     return (
                       <tr key={rowKey} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
-                        <td className="px-6 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100 break-all">
-                          {r.indicator}
+                        <td className="pl-4 pr-2.5 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
+                          <div className="break-all">{r.indicator}</div>
+                          {rowTags.length > 0 && (
+                            <div className="mt-1 flex flex-wrap gap-1 font-sans">
+                              {rowTags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="whitespace-nowrap rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">{r.type}</td>
-                        <td className="px-4 py-3 text-xs font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                        <td className="px-2.5 py-3 font-mono text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.type}</td>
+                        <td className="px-2.5 py-3 text-xs font-medium text-slate-800 dark:text-slate-200">
                           {r.source}
                         </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
+                        <td className="px-2.5 py-3 whitespace-nowrap">
                           <VerdictIndicator verdict={r.verdict} status={r.status} />
                         </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
+                        <td
+                          className="px-2.5 py-3 text-right whitespace-nowrap"
+                          title={confidence?.explanation || 'No active scores'}
+                        >
+                          {confidence && confidence.confidenceScore !== null ? (
+                            <div className="inline-flex items-baseline gap-1 font-mono text-xs tabular-nums">
+                              <span className={`font-semibold ${confTone}`}>
+                                {confidence.confidenceScore}/100
+                              </span>
+                              <span className="font-sans text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                {confidence.riskLevel}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="font-mono text-xs text-slate-400 dark:text-slate-500">—</span>
+                          )}
+                        </td>
+                        <td className="px-2.5 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums">
                           {r.score}
                         </td>
-                        <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.summary}</td>
-                        <td className="px-6 py-3 text-right whitespace-nowrap">
+                        <td className="px-2.5 py-3 text-xs text-slate-600 dark:text-slate-300">{r.summary}</td>
+                        <td className="pl-2.5 pr-4 py-3 text-right whitespace-nowrap">
                           <button
                             type="button"
                             data-testid="copy-ioc-button"
                             onClick={() => triggerClipboardCopy(formatIocClipboardText(r), rowKey)}
                             aria-label={`Copy ${r.indicator} (${r.source}) to clipboard`}
                             title="Copy to clipboard"
-                            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                               isCopied
                                 ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
                                 : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700'
@@ -1033,7 +1854,7 @@ export function InvestigateView({
                   })}
                   {filteredResults.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                      <td colSpan={8} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
                         No results match the selected verdict filter.
                       </td>
                     </tr>
@@ -1041,7 +1862,134 @@ export function InvestigateView({
                 </tbody>
               </table>
             </div>
+            )}
           </div>
+
+          <section
+            aria-label="Researcher Notes"
+            data-testid="researcher-notes-section"
+            className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <FilePenLine className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                  <label
+                    htmlFor="researcher-notes-input"
+                    className="text-base font-semibold text-slate-950 dark:text-slate-50"
+                  >
+                    Researcher Notes
+                  </label>
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  Record triage findings, correlated TTPs, or escalation decisions. Saved locally with this investigation entry.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3 text-xs shrink-0">
+                {activeHistoryEntry ? (
+                  hasUnsavedNotes ? (
+                    <span
+                      data-testid="researcher-notes-status"
+                      className="font-medium text-amber-700 dark:text-amber-400"
+                    >
+                      Unsaved changes
+                    </span>
+                  ) : normalizedSavedNotes.length > 0 ? (
+                    <span
+                      data-testid="researcher-notes-status"
+                      className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      <span>
+                        Saved to local history
+                        {activeHistoryEntry.notesUpdatedAt
+                          ? ` · ${activeHistoryEntry.notesUpdatedAt.slice(11, 16)} UTC`
+                          : ''}
+                      </span>
+                    </span>
+                  ) : notesSaveStatus === 'saved' ? (
+                    <span
+                      data-testid="researcher-notes-status"
+                      className="font-medium text-slate-500 dark:text-slate-400"
+                    >
+                      Notes cleared
+                    </span>
+                  ) : null
+                ) : (
+                  <span
+                    data-testid="researcher-notes-status"
+                    className="text-slate-500 dark:text-slate-400"
+                  >
+                    Not linked to a history entry
+                  </span>
+                )}
+
+                <span className="font-mono text-[11px] text-slate-400 dark:text-slate-500 tabular-nums">
+                  {state.researcherNotes.length}/{MAX_INVESTIGATION_NOTES_LENGTH}
+                </span>
+              </div>
+            </div>
+
+            <textarea
+              id="researcher-notes-input"
+              data-testid="researcher-notes-textarea"
+              rows={3}
+              maxLength={MAX_INVESTIGATION_NOTES_LENGTH}
+              value={state.researcherNotes}
+              onChange={(e) => {
+                const nextVal = e.target.value;
+                setNotesSaveStatus('idle');
+                onChangeState((prev) => ({ ...prev, researcherNotes: nextVal }));
+              }}
+              onBlur={() => {
+                if (activeHistoryId && hasUnsavedNotes) {
+                  persistNotesToHistory(activeHistoryId, state.researcherNotes);
+                }
+              }}
+              placeholder="Document malware family attribution, passive DNS pivots, affected hosts, or containment actions..."
+              className="mt-3 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-950/60 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-950 focus:outline-none"
+            />
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                {activeHistoryEntry
+                  ? `Linked entry: ${activeHistoryEntry.indicators.slice(0, 2).join(', ')}${activeHistoryEntry.indicators.length > 2 ? ` +${activeHistoryEntry.indicators.length - 2}` : ''}`
+                  : 'Run an enrichment lookup to link notes to a local history entry.'}
+              </span>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {state.researcherNotes.trim().length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="clear-researcher-notes-btn"
+                    onClick={() => {
+                      onChangeState((prev) => ({ ...prev, researcherNotes: '' }));
+                      if (activeHistoryId) {
+                        persistNotesToHistory(activeHistoryId, '');
+                      } else {
+                        setNotesSaveStatus('idle');
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="save-researcher-notes-btn"
+                  disabled={!activeHistoryId || !hasUnsavedNotes}
+                  onClick={() => persistNotesToHistory(activeHistoryId, state.researcherNotes)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 px-3.5 py-1.5 text-xs font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                >
+                  <Save className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>Save Notes</span>
+                </button>
+              </div>
+            </div>
+          </section>
 
           <IocNetworkGraph
             results={filteredResults}
@@ -1054,17 +2002,90 @@ export function InvestigateView({
             {groupedByIndicator.map((group) => {
               const groupKey = `group:${group.indicator}`;
               const isGroupCopied = copiedKey === groupKey;
+              const confidence = confidenceByIndicator.get(group.indicator.trim().toLowerCase());
+              const confTone = getConfidenceToneClass(confidence?.riskLevel ?? 'Unknown');
+              const iocTags = getTagsForIndicator(indicatorTags, group.indicator);
+              const isTagComposerOpen = taggingIndicator === group.indicator;
               return (
-              <div key={group.indicator} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-4">
-                  <div className="flex items-baseline gap-3">
-                    <h3 className="font-mono text-base font-semibold text-slate-950 dark:text-slate-50 break-all">
-                      {group.indicator}
-                    </h3>
-                    <span className="font-mono text-xs text-slate-500 dark:text-slate-400">{group.type}</span>
+              <div key={group.indicator} data-testid="ioc-result-card" className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+                  <div className="min-w-0 space-y-2">
+                    <div className="flex flex-wrap items-baseline gap-3">
+                      <h3 className="font-mono text-base font-semibold text-slate-950 dark:text-slate-50 break-all">
+                        {group.indicator}
+                      </h3>
+                      <span className="font-mono text-xs text-slate-500 dark:text-slate-400">{group.type}</span>
+                    </div>
+
+                    <div
+                      data-testid="ioc-card-tags"
+                      className="flex flex-wrap items-center gap-1.5"
+                    >
+                      {iocTags.map((tag) => (
+                        <span
+                          key={tag}
+                          data-testid="ioc-assigned-tag"
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-200"
+                        >
+                          <Tag className="h-3 w-3 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+                          <span>{tag}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveTag(group.indicator, tag)}
+                            aria-label={`Remove tag ${tag} from ${group.indicator}`}
+                            className="ml-0.5 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                          >
+                            <X className="h-3 w-3" aria-hidden="true" />
+                          </button>
+                        </span>
+                      ))}
+                      <button
+                        type="button"
+                        data-testid="add-tag-button"
+                        aria-expanded={isTagComposerOpen}
+                        onClick={() => {
+                          if (isTagComposerOpen) {
+                            setTaggingIndicator(null);
+                            setCustomTagInput('');
+                          } else {
+                            setTaggingIndicator(group.indicator);
+                            setCustomTagInput('');
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <Tag className="h-3 w-3" aria-hidden="true" />
+                        <span>Add Tag</span>
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    <span className="text-xs text-slate-500 dark:text-slate-400">
+
+                  <div className="flex flex-wrap items-center gap-4 shrink-0">
+                    {confidence && (
+                      <div
+                        data-testid="ioc-confidence-score"
+                        title={confidence.explanation}
+                        className="text-right"
+                      >
+                        <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                          Confidence Score
+                        </div>
+                        <div className="font-mono text-sm font-bold tabular-nums">
+                          {confidence.confidenceScore !== null ? (
+                            <>
+                              <span className={confTone}>{confidence.confidenceScore}/100</span>
+                              <span className="ml-1.5 font-sans text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                · {confidence.riskLevel}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-slate-400 dark:text-slate-500">N/A</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    <span className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
                       {group.items.length} source{group.items.length === 1 ? '' : 's'}
                     </span>
                     <button
@@ -1096,6 +2117,105 @@ export function InvestigateView({
                     </button>
                   </div>
                 </div>
+
+                {isTagComposerOpen && (
+                  <div
+                    data-testid="tag-composer"
+                    className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/60 p-3 space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mr-1">
+                        Quick labels:
+                      </span>
+                      {SUGGESTED_IOC_TAGS.map((preset) => {
+                        const alreadyTagged = iocTags.some(
+                          (t) => t.toLowerCase() === preset.toLowerCase(),
+                        );
+                        return (
+                          <button
+                            key={preset}
+                            type="button"
+                            data-testid={`preset-tag-${preset.toLowerCase().replace(/\s+/g, '-')}`}
+                            onClick={() => {
+                              if (alreadyTagged) {
+                                handleRemoveTag(group.indicator, preset);
+                              } else {
+                                handleAddTag(group.indicator, preset);
+                              }
+                            }}
+                            className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              alreadyTagged
+                                ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950'
+                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                            }`}
+                          >
+                            {alreadyTagged ? `✓ ${preset}` : `+ ${preset}`}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        data-testid="custom-tag-input"
+                        value={customTagInput}
+                        onChange={(e) => setCustomTagInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (customTagInput.trim()) {
+                              handleAddTag(group.indicator, customTagInput);
+                              setCustomTagInput('');
+                            }
+                          } else if (e.key === 'Escape') {
+                            setTaggingIndicator(null);
+                            setCustomTagInput('');
+                          }
+                        }}
+                        placeholder="Enter custom tag (e.g. Apt29, Exfiltration)"
+                        aria-label={`Custom tag for ${group.indicator}`}
+                        className="min-w-[210px] flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        data-testid="submit-tag-button"
+                        disabled={!customTagInput.trim()}
+                        onClick={() => {
+                          if (customTagInput.trim()) {
+                            handleAddTag(group.indicator, customTagInput);
+                            setCustomTagInput('');
+                          }
+                        }}
+                        className="rounded-md bg-slate-900 dark:bg-slate-100 px-3 py-1 text-xs font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Save Tag
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTaggingIndicator(null);
+                          setCustomTagInput('');
+                        }}
+                        className="rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {confidence && confidence.breakdown.length > 0 && (
+                  <div
+                    data-testid="ioc-confidence-breakdown"
+                    className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400"
+                  >
+                    <span className="font-medium text-slate-700 dark:text-slate-300">
+                      Weighted Risk ({confidence.activeProviderCount} active):
+                    </span>
+                    <span className="font-mono tabular-nums">{confidence.explanation}</span>
+                  </div>
+                )}
 
                 <div className="mt-4 grid gap-6 md:grid-cols-3">
                   {group.items.map((item) => (
@@ -1152,10 +2272,13 @@ export function InvestigateView({
         <div className="lg:sticky lg:top-20">
           <RecentInvestigationsSidebar
             entries={recentHistory}
+            indicatorTags={indicatorTags}
             activeEntryId={activeHistoryId}
             isRunning={loading}
             onViewDetails={handleViewRecentDetails}
             onRerun={handleRerunRecent}
+            onTogglePinEntry={handleTogglePinRecent}
+            onRenameEntry={handleRenameRecent}
             onRemoveEntry={handleRemoveRecent}
             onClearAll={handleClearRecent}
           />

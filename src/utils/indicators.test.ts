@@ -8,8 +8,10 @@ import {
   computeVirusTotalVerdict,
   detectDefangPatterns,
   detectIndicatorType,
+  extractRefangedUrl,
   parseIndicators,
   preprocessInputForLookup,
+  refangInputPreservingUrls,
   serializeResultsToCsv,
   type LookupResult,
 } from './indicators';
@@ -23,6 +25,8 @@ test('cleanIndicator refangs bracketed IPs, hxxp URLs, and extended defang patte
   assert.equal(cleanIndicator('hXXps[://]c2[dot]bad[.]org[:]8443/beacon'), 'c2.bad.org');
   assert.equal(cleanIndicator('fxp://drop{dot}bad[.]net/payload'), 'drop.bad.net');
   assert.equal(cleanIndicator('user[at]phish[dot]example'), 'phish.example');
+  assert.equal(extractRefangedUrl('hxxp://evil[.]com/login?next=1'), 'http://evil.com/login?next=1');
+  assert.equal(extractRefangedUrl('8.8.8.8'), null);
 });
 
 test('detectDefangPatterns and preprocessInputForLookup detect and strip defangs before API dispatch', () => {
@@ -35,6 +39,10 @@ test('detectDefangPatterns and preprocessInputForLookup detect and strip defangs
 
   const preprocessed = preprocessInputForLookup(raw);
   assert.equal(preprocessed.apiReadyInput, '1.2.3.4, 8.8.8.8, evil.com, 192.168.1.1');
+  assert.equal(
+    refangInputPreservingUrls(raw),
+    '1.2.3.4, 8.8.8.8, http://evil.com/login, 192.168.1.1',
+  );
   assert.equal(preprocessed.validIndicators.length, 4);
   assert.equal(preprocessed.invalidTokens.length, 0);
   assert.equal(preprocessed.defangedCount, 3);

@@ -64,9 +64,8 @@ export function detectDefangPatterns(raw: string): string[] {
   return found;
 }
 
-export function cleanIndicator(value: string): string {
+export function refangTokenPreservingUrl(value: string): string {
   let v = value.trim().replace(/^['"<>]+|['"<>]+$/g, '');
-  // Normalize common dot, protocol, colon, slash, and at-sign defang patterns
   v = v.replace(/\[\s*\.\s*\]|\(\s*\.\s*\)|\{\s*\.\s*\}|\[\s*dot\s*\]|\(\s*dot\s*\)|\{\s*dot\s*\}|\\\./gi, '.');
   v = v.replace(/\[\s*:\/\/\s*\]|\(\s*:\/\/\s*\)|\{\s*:\/\/\s*\}/g, '://');
   v = v.replace(/\[\s*:\s*\]|\(\s*:\s*\)|\{\s*:\s*\}|\(:|:\)/g, ':');
@@ -74,6 +73,42 @@ export function cleanIndicator(value: string): string {
   v = v.replace(/\[\s*(?:at|@)\s*\]|\(\s*(?:at|@)\s*\)/gi, '@');
   v = v.replace(/^h[tx]{2}ps?(?=:\/\/|\/)/i, (m) => (m.toLowerCase().endsWith('s') ? 'https' : 'http'));
   v = v.replace(/^fxps?(?=:\/\/)/i, (m) => (m.toLowerCase().endsWith('s') ? 'ftps' : 'ftp'));
+  return v;
+}
+
+export function extractRefangedUrl(token: string): string | null {
+  const refanged = refangTokenPreservingUrl(token);
+  if (!refanged) return null;
+
+  if (/^https?:\/\//i.test(refanged)) {
+    try {
+      const parsed = new URL(refanged);
+      if (parsed.hostname && (detectIndicatorType(parsed.hostname) === 'domain' || detectIndicatorType(parsed.hostname) === 'ip')) {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  // Handle defanged URLs without explicit scheme that include a path/query, e.g. evil[.]com/login
+  if (refanged.includes('/') && !refanged.includes(' ') && !refanged.startsWith('/')) {
+    try {
+      const parsed = new URL(`http://${refanged}`);
+      if (parsed.hostname && (detectIndicatorType(parsed.hostname) === 'domain' || detectIndicatorType(parsed.hostname) === 'ip')) {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+export function cleanIndicator(value: string): string {
+  let v = refangTokenPreservingUrl(value);
 
   if (v.includes('://')) {
     try {
@@ -138,6 +173,14 @@ export function parseIndicators(raw: string): ParsedIndicator[] {
     parsed.push({ original: token, cleaned, type });
   }
   return parsed;
+}
+
+export function refangInputPreservingUrls(raw: string): string {
+  const parsed = parseIndicators(raw);
+  return parsed
+    .map((item) => extractRefangedUrl(item.original) ?? item.cleaned)
+    .filter(Boolean)
+    .join(', ');
 }
 
 export function preprocessInputForLookup(raw: string): InputPreprocessResult {

@@ -2,11 +2,13 @@ import 'dotenv/config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import express from 'express';
+import nodemailer from 'nodemailer';
 import { createServer as createViteServer } from 'vite';
 import {
   computeAbuseIpdbVerdict,
   computeOtxVerdict,
   computeVirusTotalVerdict,
+  extractRefangedUrl,
   parseIndicators,
   serializeResultsToCsv,
   type IndicatorType,
@@ -14,6 +16,23 @@ import {
   type SourceId,
   type SourceSelection,
 } from './src/utils/indicators';
+import {
+  buildThreatFoxSampleResult,
+  buildUrlscanSampleResult,
+  buildUrlscanSearchQuery,
+  parseThreatFoxApiResponse,
+  parseUrlscanApiResponse,
+} from './src/utils/enrichmentProviders';
+import { computeAllIocConfidenceScores } from './src/utils/riskScoring';
+import {
+  buildThresholdAlertEmailContent,
+  DEFAULT_EMAIL_ALERT_CONFIG,
+  evaluateEmailAlertTriggers,
+  validateAndNormalizeEmailAlertConfig,
+  type EmailAlertConfig,
+  type EmailAlertRecord,
+  type EmailAlertTriggeredIndicator,
+} from './src/utils/emailAlerts';
 import {
   buildAggregatedCsvFilename,
   mergeHistoricalCsvRows,
@@ -59,6 +78,8 @@ const CONFIG_DIR = path.join(ROOT_DIR, 'config');
 const API_SETTINGS_FILE = path.join(CONFIG_DIR, 'api_settings.json');
 const SCHEDULES_FILE = path.join(CONFIG_DIR, 'schedules.json');
 const QUOTA_USAGE_FILE = path.join(CONFIG_DIR, 'quota_usage.json');
+const EMAIL_ALERTS_CONFIG_FILE = path.join(CONFIG_DIR, 'email_alerts_config.json');
+const EMAIL_ALERTS_LOG_FILE = path.join(CONFIG_DIR, 'email_alerts_log.json');
 const LOG_FILE = path.join(LOGS_DIR, 'soti.log');
 const REQUEST_TIMEOUT_MS = 20_000;
 const ABUSEIPDB_MAX_AGE_DAYS = 90;
@@ -141,6 +162,189 @@ async function saveQuotaLedger(ledger: DailyQuotaLedger): Promise<void> {
   await fs.writeFile(QUOTA_USAGE_FILE, JSON.stringify(ledger, null, 2) + '\n', 'utf-8');
 }
 
+function getSmtpTransportConfig() {
+  const host = (process.env.SMTP_HOST || '').trim();
+  const portNum = Number.parseInt((process.env.SMTP_PORT || '587').trim(), 10);
+  const port = Number.isFinite(portNum) && portNum > 0 ? portNum : 587;
+  const secure =
+    String(process.env.SMTP_SECURE || '').trim().toLowerCase() === 'true' || port === 465;
+  const user = (process.env.SMTP_USER || '').trim();
+  const pass = (process.env.SMTP_PASS || '').trim();
+  const fromAddress = (process.env.SMTP_FROM || user || 'soti-alerts@soti.local').trim();
+  const configured = Boolean(host);
+
+  return {
+    configured,
+    host,
+    port,
+    secure,
+    user,
+    pass,
+    fromAddress,
+    publicStatus: {
+      configured,
+      hostLabel: configured ? `${host}:${port}` : null,
+      secure,
+      fromAddress,
+    },
+  };
+}
+
+async function loadEmailAlertConfig(): Promise<EmailAlertConfig> {
+  try {
+    const raw = await fs.readFile(EMAIL_ALERTS_CONFIG_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const validated = validateAndNormalizeEmailAlertConfig(parsed);
+    if (validated.ok) return validated.config;
+  } catch {
+    // Missing or unreadable falls back to disabled defaults
+  }
+  return { ...DEFAULT_EMAIL_ALERT_CONFIG, recipients: [] };
+}
+
+async function saveEmailAlertConfig(config: EmailAlertConfig): Promise<void> {
+  await ensureDirs();
+  await fs.writeFile(EMAIL_ALERTS_CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+}
+
+async function loadEmailAlertHistory(): Promise<EmailAlertRecord[]> {
+  try {
+    const raw = await fs.readFile(EMAIL_ALERTS_LOG_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function appendEmailAlertHistory(record: EmailAlertRecord): Promise<void> {
+  await ensureDirs();
+  const existing = await loadEmailAlertHistory();
+  const next = [record, ...existing].slice(0, 50);
+  await fs.writeFile(EMAIL_ALERTS_LOG_FILE, JSON.stringify(next, null, 2) + '\n', 'utf-8');
+}
+
+async function clearEmailAlertHistory(): Promise<void> {
+  await ensureDirs();
+  await fs.writeFile(EMAIL_ALERTS_LOG_FILE, '[]\n', 'utf-8');
+}
+
+let emailCooldownByIndicator: Record<string, number> = {};
+
+async function dispatchThresholdEmail(params: {
+  config: EmailAlertConfig;
+  triggered: EmailAlertTriggeredIndicator[];
+  mode: 'sample' | 'live' | 'test';
+  reportFile?: string | null;
+}): Promise<EmailAlertRecord> {
+  const smtp = getSmtpTransportConfig();
+  const now = new Date();
+  const content = buildThresholdAlertEmailContent({
+    config: params.config,
+    triggered: params.triggered,
+    mode: params.mode,
+    fromAddress: smtp.fromAddress,
+    reportFile: params.reportFile,
+    now,
+  });
+
+  let deliveryMethod: EmailAlertRecord['deliveryMethod'] = 'local_outbox';
+  let deliveryStatus: EmailAlertRecord['deliveryStatus'] = 'queued';
+  let statusDetail =
+    'SMTP relay not configured (.env) — alert email composed & saved to local outbox (.eml downloadable).';
+
+  if (smtp.configured) {
+    deliveryMethod = 'smtp';
+    try {
+      const transporter = nodemailer.createTransport({
+        host: smtp.host,
+        port: smtp.port,
+        secure: smtp.secure,
+        ...(smtp.user ? { auth: { user: smtp.user, pass: smtp.pass } } : {}),
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 10_000,
+      });
+      const info = await transporter.sendMail({
+        from: smtp.fromAddress,
+        to: params.config.recipients.join(', '),
+        subject: content.subject,
+        text: content.textBody,
+        html: content.htmlBody,
+      });
+      deliveryStatus = 'sent';
+      statusDetail = `Delivered via SMTP (${smtp.host}:${smtp.port})${info?.messageId ? ` · ID ${info.messageId}` : ''}`;
+    } catch (err: any) {
+      deliveryStatus = 'failed';
+      statusDetail = `SMTP delivery failed (${smtp.host}:${smtp.port}): ${err?.message || 'Transport error'}`;
+    }
+  }
+
+  const record: EmailAlertRecord = {
+    id: `email-${now.getTime()}-${Math.random().toString(16).slice(2, 7)}`,
+    createdAt: now.toISOString(),
+    mode: params.mode,
+    deliveryMethod,
+    deliveryStatus,
+    statusDetail,
+    recipients: [...params.config.recipients],
+    thresholdScore: params.config.minConfidenceScore,
+    subject: content.subject,
+    textBody: content.textBody,
+    emlContent: content.emlContent,
+    triggeredIndicators: params.triggered,
+  };
+
+  await appendEmailAlertHistory(record);
+  await appendLog(
+    deliveryStatus === 'failed' ? 'ERROR' : 'INFO',
+    `EMAIL ALERT (${deliveryStatus.toUpperCase()} · ${deliveryMethod}) | To: ${record.recipients.join(', ')} | ${record.subject}`,
+  );
+  return record;
+}
+
+async function maybeSendThresholdEmailAlert(params: {
+  results: LookupResult[];
+  mode: 'sample' | 'live';
+  reportFile: string;
+}): Promise<{
+  triggered: boolean;
+  record: EmailAlertRecord | null;
+  skippedCooldown: string[];
+}> {
+  const config = await loadEmailAlertConfig();
+  const confidenceMap = computeAllIocConfidenceScores(params.results);
+  const evaluation = evaluateEmailAlertTriggers({
+    config,
+    summaries: confidenceMap.values(),
+    mode: params.mode,
+    lastAlertedAtByIndicator: emailCooldownByIndicator,
+  });
+
+  emailCooldownByIndicator = evaluation.nextLastAlertedAtByIndicator;
+
+  if (!evaluation.shouldTrigger) {
+    return {
+      triggered: false,
+      record: null,
+      skippedCooldown: evaluation.skippedCooldown,
+    };
+  }
+
+  const record = await dispatchThresholdEmail({
+    config,
+    triggered: evaluation.triggered,
+    mode: params.mode,
+    reportFile: params.reportFile,
+  });
+
+  return {
+    triggered: true,
+    record,
+    skippedCooldown: evaluation.skippedCooldown,
+  };
+}
+
 function getProviderDisplayInfos(settings: ApiSettings): { id: string; name: string; limit: number }[] {
   const list: { id: string; name: string; limit: number }[] = [
     { id: 'virustotal', name: 'VirusTotal', limit: settings.providers.virustotal.dailyQuotaLimit },
@@ -215,29 +419,38 @@ function parseHeaderInt(headers: Headers, names: string[]): number | null {
   return null;
 }
 
+let quotaTrackMutex: Promise<void> = Promise.resolve();
+
 async function trackProviderRequest(
   providerId: string,
   settings: ApiSettings,
   httpStatus: number,
   headers?: Headers,
 ): Promise<DailyQuotaLedger> {
-  const ledger = await loadQuotaLedger(settings);
-  const limits = getAllConfiguredQuotaLimits(settings);
-  const limit = limits[providerId] ?? 500;
-  const upstreamRemainingHeader = headers
-    ? parseHeaderInt(headers, ['x-ratelimit-remaining', 'ratelimit-remaining'])
-    : null;
-  const upstreamLimitHeader = headers
-    ? parseHeaderInt(headers, ['x-ratelimit-limit', 'ratelimit-limit'])
-    : null;
+  const run = quotaTrackMutex.then(async () => {
+    const ledger = await loadQuotaLedger(settings);
+    const limits = getAllConfiguredQuotaLimits(settings);
+    const limit = limits[providerId] ?? 500;
+    const upstreamRemainingHeader = headers
+      ? parseHeaderInt(headers, ['x-ratelimit-remaining', 'ratelimit-remaining'])
+      : null;
+    const upstreamLimitHeader = headers
+      ? parseHeaderInt(headers, ['x-ratelimit-limit', 'ratelimit-limit'])
+      : null;
 
-  const updated = recordQuotaConsumption(ledger, providerId, limit, {
-    httpStatus,
-    upstreamRemainingHeader,
-    upstreamLimitHeader,
+    const updated = recordQuotaConsumption(ledger, providerId, limit, {
+      httpStatus,
+      upstreamRemainingHeader,
+      upstreamLimitHeader,
+    });
+    await saveQuotaLedger(updated);
+    return updated;
   });
-  await saveQuotaLedger(updated);
-  return updated;
+  quotaTrackMutex = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 async function fetchJson(
@@ -700,53 +913,70 @@ async function lookupLiveThreatFox(
 ): Promise<LookupResult> {
   const source = SOURCE_LABELS.threatfox;
   const apiKey = getEnvKeys().threatfox;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Auth-Key'] = apiKey;
-
-  const res = await fetchJson(
-    source,
-    'threatfox',
-    indicator,
-    settings.extraProviders.threatfox.baseUrl,
-    headers,
-    settings,
-    { method: 'POST', body: JSON.stringify({ query: 'search_ioc', search_term: indicator }) },
-  );
-  if (res.errorStatus) {
+  if (!apiKey) {
+    await appendLog('WARNING', `${source} | ${indicator} | missing API key (THREATFOX_AUTH_KEY)`);
     return {
       source,
       sourceId: 'threatfox',
       indicator,
       originalToken,
       type: itype,
-      status: res.errorStatus,
+      status: 'error',
       verdict: 'Unknown',
       score: 'N/A',
-      summary: res.errorSummary || 'Lookup failed',
+      summary: 'API key missing - set THREATFOX_AUTH_KEY in .env',
       details: {},
       link: '',
     };
   }
-  const matches = Array.isArray(res.data?.data) ? res.data.data : [];
-  const maxConf = matches.reduce((m: number, item: any) => Math.max(m, Number(item?.confidence_level || 0)), 0);
-  const verdict = matches.length === 0 ? 'Unknown' : maxConf >= 75 ? 'Malicious' : 'Suspicious';
-  return {
-    source,
-    sourceId: 'threatfox',
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Auth-Key': apiKey,
+  };
+
+  const refangedUrl = extractRefangedUrl(originalToken);
+  const searchTerms = refangedUrl && refangedUrl !== indicator ? [refangedUrl, indicator] : [indicator];
+  let finalData: any = null;
+
+  for (const term of searchTerms) {
+    const res = await fetchJson(
+      source,
+      'threatfox',
+      term,
+      settings.extraProviders.threatfox.baseUrl,
+      headers,
+      settings,
+      { method: 'POST', body: JSON.stringify({ query: 'search_ioc', search_term: term }) },
+    );
+    if (res.errorStatus) {
+      return {
+        source,
+        sourceId: 'threatfox',
+        indicator,
+        originalToken,
+        type: itype,
+        status: res.errorStatus,
+        verdict: 'Unknown',
+        score: 'N/A',
+        summary: res.errorSummary || 'Lookup failed',
+        details: {},
+        link: '',
+      };
+    }
+    finalData = res.data;
+    if (finalData?.query_status === 'ok' && Array.isArray(finalData?.data) && finalData.data.length > 0) {
+      break;
+    }
+  }
+
+  return parseThreatFoxApiResponse({
     indicator,
     originalToken,
-    type: itype,
-    status: 'ok',
-    verdict,
-    score: `${matches.length} IOC match(es)`,
-    summary: matches.length > 0 ? `${matches.length} ThreatFox IOC record(s) (max confidence ${maxConf}%)` : 'Not found in ThreatFox IOC database',
-    details: {
-      Matches: matches.length,
-      Malware: matches[0]?.malware_printable ?? 'N/A',
-      'Threat Type': matches[0]?.threat_type ?? 'N/A',
-    },
-    link: `https://threatfox.abuse.ch/browse.php?search=ioc%3A${encodeURIComponent(indicator)}`,
-  };
+    itype,
+    payload: finalData,
+    sourceLabel: source,
+  });
 }
 
 async function lookupLiveUrlscan(
@@ -757,55 +987,112 @@ async function lookupLiveUrlscan(
 ): Promise<LookupResult> {
   const source = SOURCE_LABELS.urlscan;
   const apiKey = getEnvKeys().urlscan;
-  const query = itype === 'ip' ? `ip:${indicator}` : itype === 'domain' ? `domain:${indicator}` : `hash:${indicator}`;
-  const headers: Record<string, string> = {};
-  if (apiKey) headers['API-Key'] = apiKey;
-
-  const res = await fetchJson(
-    source,
-    'urlscan',
-    indicator,
-    `${settings.extraProviders.urlscan.baseUrl}/search/?q=${encodeURIComponent(query)}&size=5`,
-    headers,
-    settings,
-  );
-  if (res.errorStatus) {
+  if (!apiKey) {
+    await appendLog('WARNING', `${source} | ${indicator} | missing API key (URLSCAN_API_KEY)`);
     return {
       source,
       sourceId: 'urlscan',
       indicator,
       originalToken,
       type: itype,
-      status: res.errorStatus,
+      status: 'error',
       verdict: 'Unknown',
       score: 'N/A',
-      summary: res.errorSummary || 'Lookup failed',
+      summary: 'API key missing - set URLSCAN_API_KEY in .env',
       details: {},
       link: '',
     };
   }
-  const results = Array.isArray(res.data?.results) ? res.data.results : [];
-  const total = Number(res.data?.total ?? results.length);
-  const maliciousCount = results.filter((r: any) => Boolean(r?.verdicts?.overall?.malicious)).length;
-  const verdict = maliciousCount > 0 ? 'Malicious' : total > 0 ? 'Clean' : 'Unknown';
-  return {
+
+  const baseUrl = settings.extraProviders.urlscan.baseUrl;
+  const refangedUrl = extractRefangedUrl(originalToken);
+  const queryPlan = buildUrlscanSearchQuery(indicator, itype, refangedUrl);
+  const headers: Record<string, string> = { 'API-Key': apiKey };
+
+  let searchRes = await fetchJson(
     source,
-    sourceId: 'urlscan',
+    'urlscan',
+    queryPlan.targetLabel,
+    `${baseUrl}/search/?q=${encodeURIComponent(queryPlan.query)}&size=5`,
+    headers,
+    settings,
+  );
+  if (searchRes.errorStatus) {
+    return {
+      source,
+      sourceId: 'urlscan',
+      indicator,
+      originalToken,
+      type: itype,
+      status: searchRes.errorStatus,
+      verdict: 'Unknown',
+      score: 'N/A',
+      summary: searchRes.errorSummary || 'Lookup failed',
+      details: {},
+      link: '',
+    };
+  }
+
+  let searchPayload = searchRes.data;
+  let resultsArr = Array.isArray(searchPayload?.results) ? searchPayload.results : [];
+  if (resultsArr.length === 0 && queryPlan.fallbackQuery) {
+    const fallbackRes = await fetchJson(
+      source,
+      'urlscan',
+      indicator,
+      `${baseUrl}/search/?q=${encodeURIComponent(queryPlan.fallbackQuery)}&size=5`,
+      headers,
+      settings,
+    );
+    if (!fallbackRes.errorStatus && fallbackRes.data) {
+      searchPayload = fallbackRes.data;
+      resultsArr = Array.isArray(searchPayload?.results) ? searchPayload.results : [];
+    }
+  }
+
+  let detailPayload: any = undefined;
+  const topId = typeof resultsArr[0]?._id === 'string' ? resultsArr[0]._id : null;
+  if (topId) {
+    const detailRes = await fetchJson(
+      source,
+      'urlscan',
+      topId,
+      `${baseUrl}/result/${encodeURIComponent(topId)}/`,
+      headers,
+      settings,
+    );
+    if (!detailRes.errorStatus && detailRes.data) {
+      detailPayload = detailRes.data;
+    }
+  }
+
+  let queuedScanUuid: string | null = null;
+  if (resultsArr.length === 0 && (refangedUrl || itype === 'domain')) {
+    const scanTarget = refangedUrl || `https://${indicator}/`;
+    const submitRes = await fetchJson(
+      source,
+      'urlscan',
+      scanTarget,
+      `${baseUrl}/scan/`,
+      { ...headers, 'Content-Type': 'application/json' },
+      settings,
+      { method: 'POST', body: JSON.stringify({ url: scanTarget, visibility: 'public' }) },
+    );
+    if (!submitRes.errorStatus && typeof submitRes.data?.uuid === 'string') {
+      queuedScanUuid = submitRes.data.uuid;
+    }
+  }
+
+  return parseUrlscanApiResponse({
     indicator,
     originalToken,
-    type: itype,
-    status: 'ok',
-    verdict,
-    score: `${total} scan(s)`,
-    summary: `${total} urlscan.io historical scan(s)${maliciousCount > 0 ? `, ${maliciousCount} flagged malicious` : ''}`,
-    details: {
-      'Total Scans': total,
-      'Flagged Malicious': maliciousCount,
-      'Latest Page': results[0]?.page?.domain ?? 'N/A',
-      ...(results[0]?.page?.ip ? { 'Page IP': results[0].page.ip } : {}),
-    },
-    link: `https://urlscan.io/search/#${encodeURIComponent(query)}`,
-  };
+    itype,
+    refangedUrl,
+    searchPayload,
+    detailPayload,
+    queuedScanUuid,
+    sourceLabel: source,
+  });
 }
 
 async function lookupLiveCustomProvider(
@@ -1079,7 +1366,17 @@ async function lookupSample(
     };
   }
 
-  if (sourceId === 'threatfox' || sourceId === 'urlscan' || customProvider) {
+  if (sourceId === 'threatfox') {
+    const tier = isClean ? 'clean' : isSuspicious ? 'suspicious' : 'malicious';
+    return buildThreatFoxSampleResult(indicator, originalToken, itype, tier, seed);
+  }
+
+  if (sourceId === 'urlscan') {
+    const tier = isClean ? 'clean' : isSuspicious ? 'suspicious' : 'malicious';
+    return buildUrlscanSampleResult(indicator, originalToken, itype, tier, seed);
+  }
+
+  if (customProvider) {
     const verdict = isClean ? 'Clean' : isSuspicious ? 'Suspicious' : 'Malicious';
     return {
       source,
@@ -1457,6 +1754,7 @@ async function createApp() {
     source: SourceSelection;
     sources?: unknown;
     requestedMode?: unknown;
+    parallel?: boolean;
   }): Promise<
     | { ok: false; errorStatus: number; error: string; invalid: string[] }
     | {
@@ -1467,6 +1765,11 @@ async function createApp() {
         results: LookupResult[];
         quotaSkipped: { providerId: string; name: string; used: number; limit: number; reason: string }[];
         quota: { date: string; providers: ReturnType<typeof buildQuotaSnapshots> };
+        emailAlert: {
+          triggered: boolean;
+          record: EmailAlertRecord | null;
+          skippedCooldown: string[];
+        };
       }
   > {
     const settings = await loadApiSettings();
@@ -1543,60 +1846,89 @@ async function createApp() {
       );
     }
 
-    const results: LookupResult[] = [];
-    for (const item of valid) {
-      for (const src of availableSources) {
-        if (mode === 'live' && quotaSkippedMap.has(src)) {
-          continue;
-        }
-        let lookupRes: LookupResult;
-        if (mode === 'sample') {
-          lookupRes = await lookupSample(src, item.cleaned, item.original, item.type, settings);
-        } else if (src === 'virustotal') {
-          lookupRes = await lookupLiveVirusTotal(item.cleaned, item.original, item.type, settings);
-        } else if (src === 'abuseipdb') {
-          lookupRes = await lookupLiveAbuseIpdb(item.cleaned, item.original, item.type, settings);
-        } else if (src === 'alienvault') {
-          lookupRes = await lookupLiveOtx(item.cleaned, item.original, item.type, settings);
-        } else if (src === 'shodan') {
-          lookupRes = await lookupLiveShodan(item.cleaned, item.original, item.type, settings);
-        } else if (src === 'threatfox') {
-          lookupRes = await lookupLiveThreatFox(item.cleaned, item.original, item.type, settings);
-        } else if (src === 'urlscan') {
-          lookupRes = await lookupLiveUrlscan(item.cleaned, item.original, item.type, settings);
-        } else {
-          const custom = (settings.customProviders || []).find((c) => c.id === src);
-          lookupRes = custom
-            ? await lookupLiveCustomProvider(custom, item.cleaned, item.original, item.type, settings)
-            : {
-                source: src,
-                sourceId: src,
-                indicator: item.cleaned,
-                originalToken: item.original,
-                type: item.type,
-                status: 'error',
-                verdict: 'Unknown',
-                score: 'N/A',
-                summary: `Unknown provider "${src}"`,
-                details: {},
-                link: '',
-              };
-        }
-        results.push(lookupRes);
+    async function dispatchSingleProviderLookup(
+      item: { original: string; cleaned: string; type: IndicatorType },
+      src: string,
+    ): Promise<LookupResult> {
+      let lookupRes: LookupResult;
+      if (mode === 'sample') {
+        lookupRes = await lookupSample(src, item.cleaned, item.original, item.type, settings);
+      } else if (src === 'virustotal') {
+        lookupRes = await lookupLiveVirusTotal(item.cleaned, item.original, item.type, settings);
+      } else if (src === 'abuseipdb') {
+        lookupRes = await lookupLiveAbuseIpdb(item.cleaned, item.original, item.type, settings);
+      } else if (src === 'alienvault') {
+        lookupRes = await lookupLiveOtx(item.cleaned, item.original, item.type, settings);
+      } else if (src === 'shodan') {
+        lookupRes = await lookupLiveShodan(item.cleaned, item.original, item.type, settings);
+      } else if (src === 'threatfox') {
+        lookupRes = await lookupLiveThreatFox(item.cleaned, item.original, item.type, settings);
+      } else if (src === 'urlscan') {
+        lookupRes = await lookupLiveUrlscan(item.cleaned, item.original, item.type, settings);
+      } else {
+        const custom = (settings.customProviders || []).find((c) => c.id === src);
+        lookupRes = custom
+          ? await lookupLiveCustomProvider(custom, item.cleaned, item.original, item.type, settings)
+          : {
+              source: src,
+              sourceId: src,
+              indicator: item.cleaned,
+              originalToken: item.original,
+              type: item.type,
+              status: 'error',
+              verdict: 'Unknown',
+              score: 'N/A',
+              summary: `Unknown provider "${src}"`,
+              details: {},
+              link: '',
+            };
+      }
 
-        if (mode === 'live') {
-          ledger = await loadQuotaLedger(settings);
-          const entry = ledger.usage[src];
-          if (entry && (entry.exhausted || entry.used >= entry.limit)) {
-            const name = resolveProviderName(src, settings);
-            quotaSkippedMap.set(src, {
-              providerId: src,
-              name,
-              used: entry.used,
-              limit: entry.limit,
-              reason: entry.exhaustedReason || `Daily quota reached (${entry.used}/${entry.limit})`,
-            });
+      if (mode === 'live') {
+        ledger = await loadQuotaLedger(settings);
+        const entry = ledger.usage[src];
+        if (entry && (entry.exhausted || entry.used >= entry.limit)) {
+          const name = resolveProviderName(src, settings);
+          quotaSkippedMap.set(src, {
+            providerId: src,
+            name,
+            used: entry.used,
+            limit: entry.limit,
+            reason: entry.exhaustedReason || `Daily quota reached (${entry.used}/${entry.limit})`,
+          });
+        }
+      }
+      return lookupRes;
+    }
+
+    const results: LookupResult[] = [];
+    if (opts.parallel) {
+      // Simultaneous multi-provider execution in deterministic batches
+      const CONCURRENT_INDICATORS = 4;
+      for (let i = 0; i < valid.length; i += CONCURRENT_INDICATORS) {
+        const chunk = valid.slice(i, i + CONCURRENT_INDICATORS);
+        const chunkResults = await Promise.all(
+          chunk.map(async (item) => {
+            const activeForItem = availableSources.filter(
+              (src) => !(mode === 'live' && quotaSkippedMap.has(src)),
+            );
+            return Promise.all(
+              activeForItem.map((src) => dispatchSingleProviderLookup(item, src)),
+            );
+          }),
+        );
+        for (const perItem of chunkResults) {
+          results.push(...perItem);
+        }
+      }
+    } else {
+      for (const item of valid) {
+        for (const src of availableSources) {
+          if (mode === 'live' && quotaSkippedMap.has(src)) {
+            continue;
           }
+          const lookupRes = await dispatchSingleProviderLookup(item, src);
+          results.push(lookupRes);
         }
       }
     }
@@ -1608,6 +1940,12 @@ async function createApp() {
     const csvContent = serializeResultsToCsv(results, now.toISOString().slice(0, 19));
     await fs.writeFile(csvPath, csvContent, 'utf-8');
     await appendLog('INFO', `Saved CSV report with ${results.length} rows to ${filename}`);
+
+    const emailAlert = await maybeSendThresholdEmailAlert({
+      results,
+      mode,
+      reportFile: filename,
+    });
 
     const latestLedger = await loadQuotaLedger(settings);
     return {
@@ -1621,6 +1959,7 @@ async function createApp() {
         date: latestLedger.date,
         providers: buildQuotaSnapshots(latestLedger, getProviderDisplayInfos(settings)),
       },
+      emailAlert,
     };
   }
 
@@ -1631,6 +1970,11 @@ async function createApp() {
     reportFile: string | null;
     results: LookupResult[];
     quota?: { date: string; providers: ReturnType<typeof buildQuotaSnapshots> };
+    emailAlert?: {
+      triggered: boolean;
+      record: EmailAlertRecord | null;
+      skippedCooldown: string[];
+    };
   } | null> {
     if (runningScheduleIds.has(jobId)) {
       return null;
@@ -1702,6 +2046,7 @@ async function createApp() {
         reportFile,
         results,
         quota: outcome.ok ? outcome.quota : undefined,
+        emailAlert: outcome.ok ? outcome.emailAlert : undefined,
       };
     } finally {
       runningScheduleIds.delete(jobId);
@@ -1827,7 +2172,75 @@ async function createApp() {
       results: outcome.results,
       summary: summarizeSchedules(jobs),
       quota: outcome.quota,
+      emailAlert: outcome.emailAlert,
     });
+  });
+
+  app.get('/api/alerts/email/config', async (_req, res) => {
+    const config = await loadEmailAlertConfig();
+    const smtp = getSmtpTransportConfig();
+    res.json({ config, smtp: smtp.publicStatus });
+  });
+
+  app.put('/api/alerts/email/config', async (req, res) => {
+    const validated = validateAndNormalizeEmailAlertConfig(req.body || {});
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+    await saveEmailAlertConfig(validated.config);
+    const smtp = getSmtpTransportConfig();
+    await appendLog(
+      'INFO',
+      `Updated email threshold alert config (${validated.config.enabled ? 'ENABLED' : 'PAUSED'}, >= ${validated.config.minConfidenceScore}/100, recipients: ${validated.config.recipients.join(', ') || 'none'})`,
+    );
+    res.json({ config: validated.config, smtp: smtp.publicStatus });
+  });
+
+  app.get('/api/alerts/email/history', async (_req, res) => {
+    const records = await loadEmailAlertHistory();
+    const smtp = getSmtpTransportConfig();
+    res.json({ records, smtp: smtp.publicStatus });
+  });
+
+  app.delete('/api/alerts/email/history', async (_req, res) => {
+    await clearEmailAlertHistory();
+    await appendLog('INFO', 'Cleared threshold email alert dispatch history');
+    res.json({ ok: true, records: [] });
+  });
+
+  app.post('/api/alerts/email/test', async (req, res) => {
+    const savedConfig = await loadEmailAlertConfig();
+    const candidatePayload = {
+      ...savedConfig,
+      ...(req.body && typeof req.body === 'object' ? req.body : {}),
+      enabled: true,
+    };
+    const validated = validateAndNormalizeEmailAlertConfig(candidatePayload);
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+
+    const sampleTestTriggers: EmailAlertTriggeredIndicator[] = [
+      {
+        indicator: '185.220.101.44',
+        confidenceScore: Math.max(88, validated.config.minConfidenceScore),
+        riskLevel: validated.config.minConfidenceScore >= 75 ? 'Critical' : 'High',
+        activeProviderCount: 4,
+        explanation:
+          'VirusTotal 100/100 (w=1.5), AbuseIPDB 92/100 (w=1.4), AlienVault OTX 80/100 (w=1.0), ThreatFox 90/100 (w=1.2)',
+      },
+    ];
+
+    const record = await dispatchThresholdEmail({
+      config: validated.config,
+      triggered: sampleTestTriggers,
+      mode: 'test',
+      reportFile: null,
+    });
+    const smtp = getSmtpTransportConfig();
+    res.json({ ok: record.deliveryStatus !== 'failed', record, smtp: smtp.publicStatus });
   });
 
   app.post('/api/lookup', async (req, res) => {
@@ -1841,6 +2254,7 @@ async function createApp() {
       source,
       sources: req.body?.sources,
       requestedMode: req.body?.mode,
+      parallel: Boolean(req.body?.parallel),
     });
     if (outcome.ok === false) {
       res.status(outcome.errorStatus).json({
@@ -1858,6 +2272,7 @@ async function createApp() {
       results: outcome.results,
       quotaSkipped: outcome.quotaSkipped,
       quota: outcome.quota,
+      emailAlert: outcome.emailAlert,
     });
   });
 
@@ -1932,6 +2347,25 @@ async function createApp() {
       ? req.body.names.map((v: unknown) => String(v).trim()).filter(Boolean)
       : [];
     await handleHistoricalCsvExport(bodyNames, res);
+  });
+
+  app.get('/api/reports/all-rows', async (_req, res) => {
+    await ensureDirs();
+    const entries = await fs.readdir(REPORTS_DIR);
+    const csvNames = entries.filter((f) => f.endsWith('.csv')).sort().reverse().slice(0, 25);
+    const allRows: Record<string, string>[] = [];
+    for (const name of csvNames) {
+      try {
+        const text = await fs.readFile(path.join(REPORTS_DIR, name), 'utf-8');
+        const rows = parseCsvFile(text);
+        for (const r of rows) {
+          allRows.push({ ...r, reportName: name });
+        }
+      } catch {
+        // Ignore unreadable report files
+      }
+    }
+    res.json({ reportCount: csvNames.length, rows: allRows });
   });
 
   app.get('/api/reports/:name', async (req, res) => {

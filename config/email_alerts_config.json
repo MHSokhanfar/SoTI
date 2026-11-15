@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "recipients": [],
+  "riskTierPreset": "Critical",
+  "minConfidenceScore": 75,
+  "triggerOnSampleRuns": true,
+  "cooldownMinutes": 0,
+  "subjectPrefix": "[SoTI Alert]"
+}

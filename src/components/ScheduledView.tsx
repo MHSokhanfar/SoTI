@@ -23,6 +23,7 @@ import {
   validateAndNormalizeScheduleInput,
   type ScheduledJob,
 } from '../utils/scheduler';
+import type { EmailAlertRecord } from '../utils/emailAlerts';
 import type { QuotaState } from '../App';
 
 export interface ScheduledNavigationTarget {
@@ -34,6 +35,7 @@ export interface ScheduledNavigationTarget {
 interface ScheduledViewProps {
   onReportCreated?: (filename: string) => void;
   onQuotaChange?: (next: QuotaState) => void;
+  onEmailAlertTriggered?: (record: EmailAlertRecord) => void;
   navigationTarget?: ScheduledNavigationTarget | null;
 }
 
@@ -45,7 +47,12 @@ const SOURCE_NAMES: Record<SourceId, string> = {
 
 const PRESET_VALUES = new Set(SCHEDULE_INTERVAL_PRESETS.map((p) => p.minutes));
 
-export function ScheduledView({ onReportCreated, onQuotaChange, navigationTarget }: ScheduledViewProps) {
+export function ScheduledView({
+  onReportCreated,
+  onQuotaChange,
+  onEmailAlertTriggered,
+  navigationTarget,
+}: ScheduledViewProps) {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -213,6 +220,9 @@ export function ScheduledView({ onReportCreated, onQuotaChange, navigationTarget
       }
       if (data.quota?.date && Array.isArray(data.quota?.providers)) {
         onQuotaChange?.(data.quota);
+      }
+      if (data.emailAlert?.triggered && data.emailAlert?.record) {
+        onEmailAlertTriggered?.(data.emailAlert.record);
       }
       await loadJobs(false);
       setFeedback({

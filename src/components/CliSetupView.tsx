@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Gauge,
   HelpCircle,
+  Mail,
   Plus,
   RotateCcw,
   Save,
@@ -23,9 +24,11 @@ import {
   type BuiltinExtraSourceId,
   type CustomThreatProvider,
 } from '../utils/apiConfig';
+import type { EmailAlertRecord } from '../utils/emailAlerts';
 import type { IndicatorType, SourceId } from '../utils/indicators';
 import type { ProviderQuotaSnapshot } from '../utils/quota';
 import type { QuotaState } from '../App';
+import { EmailAlertSettingsPanel } from './EmailAlertSettingsPanel';
 
 interface CliSetupViewProps {
   keyStatus: {
@@ -37,11 +40,13 @@ interface CliSetupViewProps {
   customKeyStatus: Record<string, boolean>;
   apiSettings: ApiSettings;
   quota: QuotaState;
+  emailAlertsRefreshNonce?: number;
   onApiSettingsChange: (next: ApiSettings) => void;
   onQuotaChange: (next: QuotaState) => void;
   onConnectionTestResult?: (provider: string, ok: boolean) => void;
   onConnectionOverridesReset?: () => void;
   onOpenHelp?: () => void;
+  onEmailAlertDispatched?: (record: EmailAlertRecord) => void;
 }
 
 interface ConnectionTestResult {
@@ -120,11 +125,13 @@ export function CliSetupView({
   customKeyStatus,
   apiSettings,
   quota,
+  emailAlertsRefreshNonce = 0,
   onApiSettingsChange,
   onQuotaChange,
   onConnectionTestResult,
   onConnectionOverridesReset,
   onOpenHelp,
+  onEmailAlertDispatched,
 }: CliSetupViewProps) {
   const [draft, setDraft] = useState<ApiSettings>(apiSettings);
   const [saving, setSaving] = useState(false);
@@ -1096,6 +1103,29 @@ export function CliSetupView({
             </div>
           )}
         </form>
+      </section>
+
+      <section
+        aria-label="Threshold Email Notifications"
+        data-testid="cli-email-alerts-section"
+        className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5"
+      >
+        <div className="border-b border-slate-100 dark:border-slate-800 pb-4">
+          <div className="flex items-center gap-2">
+            <Mail className="h-4 w-4 text-slate-700 dark:text-slate-300" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">
+              Email Threshold Notifications
+            </h2>
+          </div>
+          <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
+            Automatically dispatch threshold alerts whenever any investigated or scheduled IOC exceeds a configured weighted Confidence Score (e.g., Critical ≥ 75/100). Optional SMTP relay settings live in server <code className="font-mono">.env</code> (<code className="font-mono">SMTP_HOST</code>, <code className="font-mono">SMTP_PORT</code>, <code className="font-mono">SMTP_USER</code>, <code className="font-mono">SMTP_PASS</code>).
+          </p>
+        </div>
+
+        <EmailAlertSettingsPanel
+          refreshNonce={emailAlertsRefreshNonce}
+          onAlertDispatched={onEmailAlertDispatched}
+        />
       </section>
 
       <div className="grid gap-6 lg:grid-cols-2">

@@ -182,14 +182,16 @@ export function buildGlobalSearchIndex({
     if (inv.verdictSummary.clean > 0) vParts.push(`${inv.verdictSummary.clean} clean`);
     if (vParts.length === 0) vParts.push(`${inv.results.length} results`);
 
+    const invTags = Array.isArray(inv.tags) ? inv.tags.filter(Boolean) : [];
+    const displayTitle = inv.customTitle && inv.customTitle.trim() ? inv.customTitle.trim() : title;
     entries.push({
       id: `inv-history:${inv.id}`,
       tab: 'investigate',
       tabLabel: TAB_LABELS.investigate,
       kind: 'history',
-      title: title.length > 56 ? `${title.slice(0, 53)}...` : title,
-      subtitle: `Recent session · ${vParts.join(' · ')}${inv.reportFile ? ` · ${inv.reportFile}` : ''}`,
-      searchText: `${inv.rawInput} ${inv.normalizedInput} ${inv.indicators.join(' ')} ${inv.sourceLabels.join(' ')} ${inv.reportFile || ''}`.toLowerCase(),
+      title: displayTitle.length > 56 ? `${displayTitle.slice(0, 53)}...` : displayTitle,
+      subtitle: `Recent session · ${vParts.join(' · ')}${invTags.length > 0 ? ` · Tags: ${invTags.join(', ')}` : ''}${inv.reportFile ? ` · ${inv.reportFile}` : ''}`,
+      searchText: `${inv.customTitle || ''} ${inv.rawInput} ${inv.normalizedInput} ${inv.indicators.join(' ')} ${invTags.join(' ')} ${inv.notes || ''} ${inv.sourceLabels.join(' ')} ${inv.reportFile || ''}`.toLowerCase(),
       verdictTone: tone,
       historyEntryId: inv.id,
       indicator: inv.indicators[0],
