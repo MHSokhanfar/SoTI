@@ -1,13 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar, type ActiveTab } from './components/TopBar';
 import {
   InvestigateView,
   SAMPLE_BATCH,
+  type InvestigateNavigationTarget,
   type InvestigationState,
 } from './components/InvestigateView';
-import { ReportsView } from './components/ReportsView';
-import { LogsView } from './components/LogsView';
-import { ScheduledView } from './components/ScheduledView';
+import { ReportsView, type ReportsNavigationTarget } from './components/ReportsView';
+import { LogsView, type LogsNavigationTarget } from './components/LogsView';
+import { ScheduledView, type ScheduledNavigationTarget } from './components/ScheduledView';
 import { CliSetupView } from './components/CliSetupView';
 import { HelpModal } from './components/HelpModal';
 import { NotificationCenter } from './components/NotificationCenter';
@@ -19,8 +20,18 @@ import {
   type ApiSettings,
   type BuiltinExtraSourceId,
 } from './utils/apiConfig';
+import {
+  buildGlobalSearchIndex,
+  type GlobalSearchEntry,
+} from './utils/globalSearch';
 import type { SourceId } from './utils/indicators';
+import {
+  loadRecentInvestigations,
+  type RecentInvestigationEntry,
+} from './utils/investigationHistory';
 import type { ProviderQuotaSnapshot } from './utils/quota';
+import type { ReportMeta } from './utils/reportsAnalytics';
+import type { ScheduledJob } from './utils/scheduler';
 import {
   applyThemeToDocument,
   resolveInitialTheme,
@@ -58,6 +69,19 @@ export default function App() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [latestReport, setLatestReport] = useState<string | null>(null);
+  const [searchReports, setSearchReports] = useState<ReportMeta[]>([]);
+  const [searchSchedules, setSearchSchedules] = useState<ScheduledJob[]>([]);
+  const [searchLogLines, setSearchLogLines] = useState<string[]>([]);
+  const [recentHistory, setRecentHistory] = useState<RecentInvestigationEntry[]>(() =>
+    typeof window !== 'undefined' ? loadRecentInvestigations(window.localStorage) : [],
+  );
+  const lastSearchSyncRef = useRef<number>(0);
+
+  const [investigateNav, setInvestigateNav] = useState<InvestigateNavigationTarget | null>(null);
+  const [reportsNav, setReportsNav] = useState<ReportsNavigationTarget | null>(null);
+  const [scheduledNav, setScheduledNav] = useState<ScheduledNavigationTarget | null>(null);
+  const [logsNav, setLogsNav] = useState<LogsNavigationTarget | null>(null);
+
   const [apiSettings, setApiSettings] = useState<ApiSettings>(() => cloneDefaultApiSettings());
   const [configStatus, setConfigStatus] = useState<ConfigStatus>({
     keys: { virustotal: false, abuseipdb: false, alienvault: false },
@@ -116,9 +140,46 @@ export default function App() {
       .catch(() => {});
   }
 
+  const refreshGlobalSearchData = useCallback((force = false) => {
+    const now = Date.now();
+    if (!force && now - lastSearchSyncRef.current < 4000) return;
+    lastSearchSyncRef.current = now;
+
+    fetch('/api/reports')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data?.reports)) {
+          setSearchReports(data.reports);
+          if (data.reports.length > 0) {
+            setLatestReport(data.reports[0].name);
+          }
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/schedules')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data?.jobs)) {
+          setSearchSchedules(data.jobs);
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/logs')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data?.lines)) {
+          setSearchLogLines(data.lines);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     refreshConfigStatus();
     refreshQuotaState();
+    refreshGlobalSearchData(true);
 
     fetch('/api/config/apis')
       .then((r) => r.json())
@@ -129,22 +190,13 @@ export default function App() {
       })
       .catch(() => {});
 
-    fetch('/api/reports')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data?.reports) && data.reports.length > 0) {
-          setLatestReport(data.reports[0].name);
-        }
-      })
-      .catch(() => {});
-
     const quotaPollTimer = window.setInterval(refreshQuotaState, 15_000);
     window.addEventListener('focus', refreshQuotaState);
     return () => {
       window.clearInterval(quotaPollTimer);
       window.removeEventListener('focus', refreshQuotaState);
     };
-  }, []);
+  }, [refreshGlobalSearchData]);
 
   useEffect(() => {
     applyThemeToDocument(theme);
@@ -156,6 +208,70 @@ export default function App() {
   }, [theme]);
 
   const effectiveApiStatus = mergeConfigAndConnectionStatus(configStatus.keys, connectionOverrides);
+
+  const globalSearchEntries = useMemo(
+    () =>
+      buildGlobalSearchIndex({
+        currentResults: investigationState.results,
+        recentInvestigations: recentHistory,
+        reports: searchReports,
+        schedules: searchSchedules,
+        logLines: searchLogLines,
+        apiSettings,
+      }),
+    [
+      investigationState.results,
+      recentHistory,
+      searchReports,
+      searchSchedules,
+      searchLogLines,
+      apiSettings,
+    ],
+  );
+
+  function handleSelectGlobalSearchResult(entry: GlobalSearchEntry, query: string) {
+    const nonce = Date.now();
+    if (entry.tab === 'investigate') {
+      setActiveTab('investigate');
+      setInvestigateNav({
+        indicator: entry.indicator,
+        historyEntryId: entry.historyEntryId,
+        nonce,
+      });
+      return;
+    }
+
+    if (entry.tab === 'reports') {
+      setActiveTab('reports');
+      setReportsNav({
+        reportName: entry.reportName,
+        searchQuery: entry.kind === 'ioc' ? (entry.indicator || query.trim()) : '',
+        nonce,
+      });
+      return;
+    }
+
+    if (entry.tab === 'scheduled') {
+      setActiveTab('scheduled');
+      setScheduledNav({
+        scheduleId: entry.scheduleId,
+        searchQuery: entry.indicator || query.trim(),
+        nonce,
+      });
+      return;
+    }
+
+    if (entry.tab === 'logs') {
+      setActiveTab('logs');
+      setLogsNav({
+        query: query.trim() || entry.title,
+        nonce,
+      });
+      return;
+    }
+
+    setActiveTab('cli');
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
@@ -170,6 +286,9 @@ export default function App() {
         notificationCount={unreadNotifications}
         notificationsOpen={notificationsOpen}
         onToggleNotifications={() => setNotificationsOpen((prev) => !prev)}
+        searchEntries={globalSearchEntries}
+        onSearchFocus={() => refreshGlobalSearchData(false)}
+        onSelectSearchResult={handleSelectGlobalSearchResult}
       />
 
       <NotificationCenter
@@ -190,20 +309,32 @@ export default function App() {
             state={investigationState}
             apiSettings={apiSettings}
             quota={quotaState}
+            theme={theme}
             onChangeState={setInvestigationState}
             onQuotaChange={setQuotaState}
-            onReportCreated={(name) => setLatestReport(name)}
+            onReportCreated={(name) => {
+              setLatestReport(name);
+              refreshGlobalSearchData(true);
+            }}
             onOpenApiConfig={() => setActiveTab('cli')}
+            navigationTarget={investigateNav}
+            onRecentHistoryChange={setRecentHistory}
           />
         )}
-        {activeTab === 'reports' && <ReportsView theme={theme} />}
+        {activeTab === 'reports' && (
+          <ReportsView theme={theme} navigationTarget={reportsNav} />
+        )}
         {activeTab === 'scheduled' && (
           <ScheduledView
-            onReportCreated={(name) => setLatestReport(name)}
+            onReportCreated={(name) => {
+              setLatestReport(name);
+              refreshGlobalSearchData(true);
+            }}
             onQuotaChange={setQuotaState}
+            navigationTarget={scheduledNav}
           />
         )}
-        {activeTab === 'logs' && <LogsView />}
+        {activeTab === 'logs' && <LogsView navigationTarget={logsNav} />}
         {activeTab === 'cli' && (
           <CliSetupView
             keyStatus={configStatus.keys}

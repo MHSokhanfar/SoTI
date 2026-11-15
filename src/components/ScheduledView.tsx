@@ -25,9 +25,16 @@ import {
 } from '../utils/scheduler';
 import type { QuotaState } from '../App';
 
+export interface ScheduledNavigationTarget {
+  scheduleId?: string | null;
+  searchQuery?: string;
+  nonce: number;
+}
+
 interface ScheduledViewProps {
   onReportCreated?: (filename: string) => void;
   onQuotaChange?: (next: QuotaState) => void;
+  navigationTarget?: ScheduledNavigationTarget | null;
 }
 
 const SOURCE_NAMES: Record<SourceId, string> = {
@@ -38,12 +45,13 @@ const SOURCE_NAMES: Record<SourceId, string> = {
 
 const PRESET_VALUES = new Set(SCHEDULE_INTERVAL_PRESETS.map((p) => p.minutes));
 
-export function ScheduledView({ onReportCreated, onQuotaChange }: ScheduledViewProps) {
+export function ScheduledView({ onReportCreated, onQuotaChange, navigationTarget }: ScheduledViewProps) {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [highlightedJobId, setHighlightedJobId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -79,6 +87,21 @@ export function ScheduledView({ onReportCreated, onQuotaChange }: ScheduledViewP
     const timer = setInterval(() => loadJobs(false), 15_000);
     return () => clearInterval(timer);
   }, [loadJobs]);
+
+  useEffect(() => {
+    if (!navigationTarget) return;
+    if (navigationTarget.scheduleId) {
+      setHighlightedJobId(navigationTarget.scheduleId);
+    } else if (navigationTarget.searchQuery) {
+      const q = navigationTarget.searchQuery.trim().toLowerCase();
+      const match = jobs.find(
+        (j) =>
+          j.name.toLowerCase().includes(q) ||
+          j.indicators.some((ind) => ind.toLowerCase().includes(q)),
+      );
+      setHighlightedJobId(match?.id ?? null);
+    }
+  }, [navigationTarget?.nonce, jobs]);
 
   const summary = useMemo(() => summarizeSchedules(jobs), [jobs]);
   const parsedPreview = useMemo(() => parseIndicators(formIndicators), [formIndicators]);
@@ -553,8 +576,18 @@ export function ScheduledView({ onReportCreated, onQuotaChange }: ScheduledViewP
                           ? 'text-red-700 dark:text-red-400'
                           : 'text-slate-500 dark:text-slate-400';
 
+                  const isHighlighted = highlightedJobId === job.id;
                   return (
-                    <tr key={job.id} data-testid={`schedule-row-${job.id}`} className="align-top hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
+                    <tr
+                      key={job.id}
+                      data-testid={`schedule-row-${job.id}`}
+                      data-highlighted={isHighlighted ? 'true' : undefined}
+                      className={`align-top transition-colors ${
+                        isHighlighted
+                          ? 'bg-red-50/60 dark:bg-red-950/30'
+                          : 'hover:bg-slate-50/60 dark:hover:bg-slate-800/40'
+                      }`}
+                    >
                       <td className="py-3.5 pl-5 pr-3">
                         <div className="flex items-center gap-2">
                           <span

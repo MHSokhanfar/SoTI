@@ -1,7 +1,16 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, ScrollText } from 'lucide-react';
 
-export function LogsView() {
+export interface LogsNavigationTarget {
+  query: string;
+  nonce: number;
+}
+
+interface LogsViewProps {
+  navigationTarget?: LogsNavigationTarget | null;
+}
+
+export function LogsView({ navigationTarget }: LogsViewProps) {
   const [lines, setLines] = useState<string[]>([]);
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
@@ -20,6 +29,11 @@ export function LogsView() {
   useEffect(() => {
     loadLogs();
   }, []);
+
+  useEffect(() => {
+    if (!navigationTarget) return;
+    setFilter(navigationTarget.query);
+  }, [navigationTarget?.nonce]);
 
   const visibleLines = filter.trim()
     ? lines.filter((l) => l.toLowerCase().includes(filter.trim().toLowerCase()))

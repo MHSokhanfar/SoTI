@@ -182,6 +182,53 @@ export interface CapturedChartImage {
   height: number;
 }
 
+const DARK_COLOR_MAP: Record<string, string> = {
+  '#1e293b': '#e2e8f0',
+  'rgb(30, 41, 59)': '#e2e8f0',
+  '#334155': '#cbd5e1',
+  'rgb(51, 65, 85)': '#cbd5e1',
+  '#94a3b8': '#475569',
+  'rgb(148, 163, 184)': '#475569',
+  '#cbd5e1': '#475569',
+  'rgb(203, 213, 225)': '#475569',
+  '#f1f5f9': '#0f172a',
+  'rgb(241, 245, 249)': '#0f172a',
+  '#0f172a': '#ffffff',
+  'rgb(15, 23, 42)': '#ffffff',
+};
+
+export function mapDarkSvgColorToPdfLight(color: string | null | undefined): string | null {
+  if (!color) return null;
+  const normalized = color.trim().toLowerCase();
+  return DARK_COLOR_MAP[normalized] ?? null;
+}
+
+function normalizeSvgColorsForLightPdf(root: SVGSVGElement): void {
+  const nodes = [root, ...Array.from(root.querySelectorAll<SVGElement>('*'))];
+  for (const el of nodes) {
+    const stroke = el.getAttribute('stroke');
+    const mappedStroke = mapDarkSvgColorToPdfLight(stroke);
+    if (mappedStroke) {
+      el.setAttribute('stroke', mappedStroke);
+    }
+
+    const fill = el.getAttribute('fill');
+    const mappedFill = mapDarkSvgColorToPdfLight(fill);
+    if (mappedFill) {
+      el.setAttribute('fill', mappedFill);
+    }
+
+    if (el.style) {
+      const styleStroke = mapDarkSvgColorToPdfLight(el.style.stroke);
+      if (styleStroke) el.style.stroke = styleStroke;
+      const styleFill = mapDarkSvgColorToPdfLight(el.style.fill);
+      if (styleFill) el.style.fill = styleFill;
+      const styleColor = mapDarkSvgColorToPdfLight(el.style.color);
+      if (styleColor) el.style.color = styleColor;
+    }
+  }
+}
+
 async function captureSvgChartPng(containerSelector: string): Promise<CapturedChartImage | null> {
   if (typeof document === 'undefined') return null;
   const container = document.querySelector(containerSelector);
@@ -201,6 +248,7 @@ async function captureSvgChartPng(containerSelector: string): Promise<CapturedCh
   cloned.setAttribute('height', String(height));
   cloned.style.fontFamily = 'sans-serif';
   cloned.style.backgroundColor = '#ffffff';
+  normalizeSvgColorsForLightPdf(cloned);
 
   const serialized = new XMLSerializer().serializeToString(cloned);
   const dataUri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(serialized)}`;

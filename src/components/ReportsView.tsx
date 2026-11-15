@@ -26,7 +26,6 @@ import {
   areAllVisibleReportsSelected,
   buildAggregatedCsvFilename,
   buildHistoricalChartData,
-  buildPrintDocumentTitle,
   buildThreatAlertTrend30Days,
   computeIndicatorConfidenceMap,
   computeReportsQuickStats,
@@ -49,6 +48,7 @@ import {
   type TableDensity,
   type VerdictFilterOption,
 } from '../utils/reportsAnalytics';
+import { exportReportsDashboardPdf } from '../utils/reportPdf';
 import type { ThemeMode } from '../utils/theme';
 
 type ChartScope = 'malicious_clean' | 'all_verdicts';
@@ -62,11 +62,18 @@ interface ToastNotification {
   detail: string;
 }
 
-interface ReportsViewProps {
-  theme?: ThemeMode;
+export interface ReportsNavigationTarget {
+  reportName?: string | null;
+  searchQuery?: string;
+  nonce: number;
 }
 
-export function ReportsView({ theme = 'light' }: ReportsViewProps) {
+interface ReportsViewProps {
+  theme?: ThemeMode;
+  navigationTarget?: ReportsNavigationTarget | null;
+}
+
+export function ReportsView({ theme = 'light', navigationTarget }: ReportsViewProps) {
   const isDark = theme === 'dark';
   const [reports, setReports] = useState<ReportMeta[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -76,6 +83,7 @@ export function ReportsView({ theme = 'light' }: ReportsViewProps) {
   const [loadingRows, setLoadingRows] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [exportingSelectedCsv, setExportingSelectedCsv] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [selectedForExport, setSelectedForExport] = useState<string[]>([]);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [refreshIntervalSec, setRefreshIntervalSec] = useState<number>(DEFAULT_REPORTS_REFRESH_SECONDS);
@@ -251,39 +259,53 @@ export function ReportsView({ theme = 'light' }: ReportsViewProps) {
     }
   }
 
-  function handleDownloadPdf() {
-    if (reports.length === 0) return;
+  async function handleDownloadPdf() {
+    if (reports.length === 0 || exportingPdf) return;
+    setExportingPdf(true);
 
-    const previousTitle = document.title;
-    const printTitle = buildPrintDocumentTitle(selectedName);
-    document.title = printTitle;
-
-    let restored = false;
-    const restoreTitle = () => {
-      if (restored) return;
-      restored = true;
-      document.title = previousTitle;
-      window.removeEventListener('afterprint', restoreTitle);
-    };
-
-    window.addEventListener('afterprint', restoreTitle);
-
-    pushToast({
-      variant: 'info',
-      title: 'Print-ready PDF dialog opened',
-      detail: `Choose "Save as PDF" (${printTitle}.pdf) in your browser print dialog.`,
-    });
+    const toastId = pushToast(
+      {
+        variant: 'info',
+        title: 'Generating PDF report',
+        detail: 'Capturing analytics charts and current data table...',
+      },
+      { id: 'pdf-export-toast', durationMs: 12000 },
+    );
 
     try {
-      window.print();
-    } catch {
-      pushToast({
-        variant: 'error',
-        title: 'Print dialog unavailable',
-        detail: 'Use your browser Print shortcut (Ctrl/Cmd+P) to save as PDF.',
+      const result = await exportReportsDashboardPdf({
+        reports,
+        filteredReports,
+        selectedName,
+        allRowsCount: rows.length,
+        filteredRows,
+        confidenceMap,
+        searchQuery,
+        verdictFilter,
+        quickStats,
+        totals,
+        trendSummary,
       });
+
+      pushToast(
+        {
+          variant: 'success',
+          title: 'PDF report downloaded',
+          detail: `${result.filename} (${result.pageCount} page${result.pageCount === 1 ? '' : 's'})`,
+        },
+        { id: toastId, durationMs: 4500 },
+      );
+    } catch {
+      pushToast(
+        {
+          variant: 'error',
+          title: 'PDF export failed',
+          detail: 'Unable to generate downloadable PDF report.',
+        },
+        { id: toastId, durationMs: 5000 },
+      );
     } finally {
-      window.setTimeout(restoreTitle, 1000);
+      setExportingPdf(false);
     }
   }
 
@@ -356,6 +378,17 @@ export function ReportsView({ theme = 'light' }: ReportsViewProps) {
     }, refreshIntervalSec * 1000);
     return () => window.clearInterval(timer);
   }, [autoRefreshEnabled, refreshIntervalSec]);
+
+  useEffect(() => {
+    if (!navigationTarget) return;
+    setVerdictFilter('All');
+    if (typeof navigationTarget.searchQuery === 'string') {
+      setSearchQuery(navigationTarget.searchQuery);
+    }
+    if (navigationTarget.reportName) {
+      selectReport(navigationTarget.reportName);
+    }
+  }, [navigationTarget?.nonce]);
 
   const { series, totals } = useMemo(
     () => buildHistoricalChartData(reports),
@@ -550,13 +583,17 @@ export function ReportsView({ theme = 'light' }: ReportsViewProps) {
             type="button"
             data-testid="download-pdf-button"
             onClick={handleDownloadPdf}
-            disabled={reports.length === 0}
+            disabled={reports.length === 0 || exportingPdf}
             aria-label="Download PDF"
-            title="Capture current dashboard as print-ready PDF"
+            title="Download current dashboard charts and data table as PDF"
             className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
           >
-            <FileText className="h-3.5 w-3.5 text-slate-600 dark:text-slate-400" aria-hidden="true" />
-            <span>Download PDF</span>
+            {exportingPdf ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-600 dark:text-slate-300" aria-hidden="true" />
+            ) : (
+              <FileText className="h-3.5 w-3.5 text-slate-600 dark:text-slate-400" aria-hidden="true" />
+            )}
+            <span>{exportingPdf ? 'Generating PDF...' : 'Download PDF'}</span>
           </button>
 
           <button

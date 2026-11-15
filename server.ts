@@ -356,6 +356,13 @@ async function lookupLiveVirusTotal(
     details.Registrar = attrs.registrar ?? 'N/A';
     const cats = attrs.categories ? Object.values(attrs.categories) : [];
     if (cats.length) details.Categories = Array.from(new Set(cats.map(String))).sort().join(', ');
+    if (Array.isArray(attrs.last_dns_records)) {
+      const dnsIps = attrs.last_dns_records
+        .filter((rec: any) => (rec?.type === 'A' || rec?.type === 'AAAA') && rec?.value)
+        .map((rec: any) => String(rec.value))
+        .slice(0, 3);
+      if (dnsIps.length) details['Resolved IP'] = dnsIps.join(', ');
+    }
   } else {
     details.Name = attrs.meaningful_name ?? 'N/A';
     details.Type = attrs.type_description ?? 'N/A';
@@ -658,7 +665,18 @@ async function lookupLiveShodan(
   const data = res.data || {};
   const ports = Array.isArray(data.ports) ? data.ports : [];
   const vulns = Array.isArray(data.vulns) ? data.vulns : [];
+  const hostnames = Array.isArray(data.hostnames) ? data.hostnames.filter(Boolean).slice(0, 3) : [];
   const verdict = vulns.length >= 3 ? 'Malicious' : vulns.length > 0 ? 'Suspicious' : 'Clean';
+  const details: Record<string, string | number | boolean | null> = {
+    Organization: data.org ?? 'N/A',
+    ISP: data.isp ?? 'N/A',
+    ASN: data.asn ?? 'N/A',
+    Country: data.country_name ?? 'N/A',
+    Ports: ports.slice(0, 10).join(', ') || 'None',
+  };
+  if (hostnames.length) {
+    details.Hostnames = hostnames.join(', ');
+  }
   return {
     source,
     sourceId: 'shodan',
@@ -669,13 +687,7 @@ async function lookupLiveShodan(
     verdict,
     score: `${ports.length} ports / ${vulns.length} CVEs`,
     summary: `${ports.length} open port(s), ${vulns.length} known CVE(s)`,
-    details: {
-      Organization: data.org ?? 'N/A',
-      ISP: data.isp ?? 'N/A',
-      ASN: data.asn ?? 'N/A',
-      Country: data.country_name ?? 'N/A',
-      Ports: ports.slice(0, 10).join(', ') || 'None',
-    },
+    details,
     link: `https://www.shodan.io/host/${indicator}`,
   };
 }
@@ -790,6 +802,7 @@ async function lookupLiveUrlscan(
       'Total Scans': total,
       'Flagged Malicious': maliciousCount,
       'Latest Page': results[0]?.page?.domain ?? 'N/A',
+      ...(results[0]?.page?.ip ? { 'Page IP': results[0].page.ip } : {}),
     },
     link: `https://urlscan.io/search/#${encodeURIComponent(query)}`,
   };
@@ -971,14 +984,31 @@ async function lookupSample(
       details.Country = isClean ? 'US' : ['NL', 'RU', 'DE', 'SG'][seed % 4];
       details['AS Owner'] = isClean ? 'Google LLC' : 'Example Autonomous Hosting';
       details.ASN = isClean ? 15169 : 49505 + (seed % 200);
+      if (!isClean) {
+        details['Communicating File'] = eicarHash;
+      }
     } else if (itype === 'domain') {
       details.Registrar = isClean ? 'MarkMonitor Inc.' : 'NameCheap, Inc.';
       details.Categories = isClean ? 'Search Engine, Technology' : 'Phishing, Newly Registered Domain';
+      details['Resolved IP'] = isClean
+        ? indicator === 'google.com'
+          ? '8.8.8.8'
+          : '1.1.1.1'
+        : indicator === 'evil.com'
+          ? '1.2.3.4'
+          : `185.220.${100 + (seed % 20)}.${10 + (seed % 190)}`;
+      if (!isClean) {
+        details['Communicating File'] = eicarHash;
+      }
     } else {
       details.Name = indicator === eicarHash ? 'eicar.com' : 'payload_sample.bin';
       details.Type = indicator === eicarHash ? 'ASCII text' : 'Win32 EXE';
       details.Size = indicator === eicarHash ? 68 : 284672;
-      if (!isClean) details['Threat Label'] = indicator === eicarHash ? 'eicar.test.file' : 'trojan.cobaltstrike/beacon';
+      if (!isClean) {
+        details['Threat Label'] = indicator === eicarHash ? 'eicar.test.file' : 'trojan.cobaltstrike/beacon';
+        details['Contacted Domain'] = 'evil.com';
+        details['Contacted IP'] = '1.2.3.4';
+      }
     }
 
     return {

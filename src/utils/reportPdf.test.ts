@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildPdfDocumentData,
   buildPdfReportFilename,
+  mapDarkSvgColorToPdfLight,
   sanitizePdfCell,
 } from './reportPdf';
 import {
@@ -119,3 +120,11 @@ test('buildPdfDocumentData structures KPIs, historical runs, confidence scores, 
   assert.equal(docData.indicatorRows[0].verdictLabel, 'Malicious');
   assert.match(docData.indicatorRows[0].confidenceLabel, /81% \(2 src\)/);
 });
+
+test('mapDarkSvgColorToPdfLight maps dark theme chart colors to crisp light-paper ink', () => {
+  assert.equal(mapDarkSvgColorToPdfLight('#1E293B'), '#e2e8f0');
+  assert.equal(mapDarkSvgColorToPdfLight('#94A3B8'), '#475569');
+  assert.equal(mapDarkSvgColorToPdfLight('rgb(15, 23, 42)'), '#ffffff');
+  assert.equal(mapDarkSvgColorToPdfLight('#DC2626'), null);
+});
+

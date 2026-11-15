@@ -24,18 +24,56 @@ export interface ParsedIndicator {
   type: IndicatorType | null;
 }
 
+export interface InputPreprocessResult {
+  rawInput: string;
+  apiReadyInput: string;
+  parsed: ParsedIndicator[];
+  validIndicators: ParsedIndicator[];
+  invalidTokens: string[];
+  detectedPatterns: string[];
+  defangedCount: number;
+}
+
 const HASH_RE = /^(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/;
 const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 // Covers standard compressed and full IPv6 literals
 const IPV6_RE = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^((?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?::((?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?$/;
 
+const DEFANG_PATTERN_SPECS: { label: string; regex: RegExp }[] = [
+  { label: '[.]', regex: /\[\s*\.\s*\]/ },
+  { label: '(.)', regex: /\(\s*\.\s*\)/ },
+  { label: '{.}', regex: /\{\s*\.\s*\}/ },
+  { label: '[dot]', regex: /[[({]\s*dot\s*[\])}]/i },
+  { label: 'hxxp', regex: /\bh[tx]{2}ps?(?=\s*(?::|\[|\(|\{))/i },
+  { label: 'fxp', regex: /\bfxps?(?=\s*(?::|\[|\(|\{))/i },
+  { label: '[://]', regex: /[[({]\s*:?\/\/\s*[\])}]/ },
+  { label: '[:]', regex: /[[({]\s*:\s*[\])}]|\(:|:\)/ },
+  { label: '[at]', regex: /[[({]\s*(?:at|@)\s*[\])}]/i },
+  { label: '\\.', regex: /\\\./ },
+];
+
+export function detectDefangPatterns(raw: string): string[] {
+  if (!raw) return [];
+  const found: string[] = [];
+  for (const spec of DEFANG_PATTERN_SPECS) {
+    if (spec.regex.test(raw)) {
+      found.push(spec.label);
+    }
+  }
+  return found;
+}
+
 export function cleanIndicator(value: string): string {
   let v = value.trim().replace(/^['"<>]+|['"<>]+$/g, '');
-  v = v.replace(/\[\.\]|\(\.\)|\[dot\]|\(dot\)/gi, '.');
-  v = v.replace(/\[:\]|\(:|:\)/g, ':');
-  v = v.replace(/\[:\/\/\]/g, '://');
-  v = v.replace(/^hxxps?/i, (m) => (m.toLowerCase().endsWith('s') ? 'https' : 'http'));
+  // Normalize common dot, protocol, colon, slash, and at-sign defang patterns
+  v = v.replace(/\[\s*\.\s*\]|\(\s*\.\s*\)|\{\s*\.\s*\}|\[\s*dot\s*\]|\(\s*dot\s*\)|\{\s*dot\s*\}|\\\./gi, '.');
+  v = v.replace(/\[\s*:\/\/\s*\]|\(\s*:\/\/\s*\)|\{\s*:\/\/\s*\}/g, '://');
+  v = v.replace(/\[\s*:\s*\]|\(\s*:\s*\)|\{\s*:\s*\}|\(:|:\)/g, ':');
+  v = v.replace(/\[\s*\/\s*\]|\(\s*\/\s*\)/g, '/');
+  v = v.replace(/\[\s*(?:at|@)\s*\]|\(\s*(?:at|@)\s*\)/gi, '@');
+  v = v.replace(/^h[tx]{2}ps?(?=:\/\/|\/)/i, (m) => (m.toLowerCase().endsWith('s') ? 'https' : 'http'));
+  v = v.replace(/^fxps?(?=:\/\/)/i, (m) => (m.toLowerCase().endsWith('s') ? 'ftps' : 'ftp'));
 
   if (v.includes('://')) {
     try {
@@ -45,6 +83,11 @@ export function cleanIndicator(value: string): string {
       }
     } catch {
       // keep best-effort stripped value
+    }
+  } else if (v.includes('@') && !v.includes(' ')) {
+    const afterAt = v.split('@').pop() || '';
+    if (afterAt) {
+      v = afterAt;
     }
   } else if (v.split(':').length === 2 && !v.startsWith('[')) {
     const [hostPart, portPart] = v.split(':');
@@ -95,6 +138,27 @@ export function parseIndicators(raw: string): ParsedIndicator[] {
     parsed.push({ original: token, cleaned, type });
   }
   return parsed;
+}
+
+export function preprocessInputForLookup(raw: string): InputPreprocessResult {
+  const parsed = parseIndicators(raw);
+  const validIndicators = parsed.filter((item) => item.type !== null);
+  const invalidTokens = parsed.filter((item) => item.type === null).map((item) => item.cleaned || item.original);
+  const detectedPatterns = detectDefangPatterns(raw);
+  const defangedCount = parsed.filter(
+    (item) => item.original.trim().toLowerCase() !== item.cleaned.toLowerCase(),
+  ).length;
+
+  const apiTokens = parsed.map((item) => item.cleaned).filter(Boolean);
+  return {
+    rawInput: raw,
+    apiReadyInput: apiTokens.join(', '),
+    parsed,
+    validIndicators,
+    invalidTokens,
+    detectedPatterns,
+    defangedCount,
+  };
 }
 
 export function computeVirusTotalVerdict(malicious: number, suspicious: number, total: number): Verdict {
@@ -153,4 +217,16 @@ export function serializeResultsToCsv(results: LookupResult[], timestampIso: str
     lines.push(row.join(','));
   }
   return '\ufeff' + lines.join('\r\n') + '\r\n';
+}
+
+export function buildInvestigationCsvFilename(
+  verdictFilter: 'All' | Verdict = 'All',
+  now: Date = new Date(),
+): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const stamp =
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}_` +
+    `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+  const scope = verdictFilter === 'All' ? '' : `_${verdictFilter.toLowerCase()}`;
+  return `soti_investigation${scope}_${stamp}.csv`;
 }

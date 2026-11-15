@@ -1,21 +1,45 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildInvestigationCsvFilename,
   cleanIndicator,
   computeAbuseIpdbVerdict,
   computeOtxVerdict,
   computeVirusTotalVerdict,
+  detectDefangPatterns,
   detectIndicatorType,
   parseIndicators,
+  preprocessInputForLookup,
   serializeResultsToCsv,
   type LookupResult,
 } from './indicators';
 
-test('cleanIndicator refangs bracketed IPs, hxxp URLs, and ports', () => {
+test('cleanIndicator refangs bracketed IPs, hxxp URLs, and extended defang patterns', () => {
   assert.equal(cleanIndicator('1[.]2[.]3[.]4'), '1.2.3.4');
   assert.equal(cleanIndicator('1(.)2(.)3(.)4'), '1.2.3.4');
+  assert.equal(cleanIndicator('1{.}2{.}3{.}4'), '1.2.3.4');
+  assert.equal(cleanIndicator('1\\.2\\.3\\.4'), '1.2.3.4');
   assert.equal(cleanIndicator('hxxp://evil[.]com/login?next=1'), 'evil.com');
-  assert.equal(cleanIndicator('hxxps[://]c2[dot]bad[.]org[:]8443/beacon'), 'c2.bad.org');
+  assert.equal(cleanIndicator('hXXps[://]c2[dot]bad[.]org[:]8443/beacon'), 'c2.bad.org');
+  assert.equal(cleanIndicator('fxp://drop{dot}bad[.]net/payload'), 'drop.bad.net');
+  assert.equal(cleanIndicator('user[at]phish[dot]example'), 'phish.example');
+});
+
+test('detectDefangPatterns and preprocessInputForLookup detect and strip defangs before API dispatch', () => {
+  const raw = '1[.]2[.]3[.]4, 8.8.8.8, hxxp://evil[dot]com/login, 192\\.168\\.1\\.1';
+  const patterns = detectDefangPatterns(raw);
+  assert.ok(patterns.includes('[.]'));
+  assert.ok(patterns.includes('[dot]'));
+  assert.ok(patterns.includes('hxxp'));
+  assert.ok(patterns.includes('\\.'));
+
+  const preprocessed = preprocessInputForLookup(raw);
+  assert.equal(preprocessed.apiReadyInput, '1.2.3.4, 8.8.8.8, evil.com, 192.168.1.1');
+  assert.equal(preprocessed.validIndicators.length, 4);
+  assert.equal(preprocessed.invalidTokens.length, 0);
+  assert.equal(preprocessed.defangedCount, 3);
+  assert.ok(!preprocessed.apiReadyInput.includes('[.]'));
+  assert.ok(!preprocessed.apiReadyInput.includes('hxxp'));
 });
 
 test('detectIndicatorType distinguishes IPv4, IPv6, MD5, SHA1, SHA256, domain, and invalid', () => {
@@ -79,4 +103,14 @@ test('serializeResultsToCsv produces UTF-8 BOM Excel-safe CSV', () => {
   const csvText = serializeResultsToCsv(sample, '2026-11-14T03:30:00');
   assert.ok(csvText.startsWith('\ufefftimestamp,source,indicator'));
   assert.ok(csvText.includes('VirusTotal,8.8.8.8,ip,ok,Clean,0/90'));
+
+  const fixedNow = new Date('2026-11-15T04:15:09.000Z');
+  assert.equal(
+    buildInvestigationCsvFilename('All', fixedNow),
+    'soti_investigation_20261115_041509.csv',
+  );
+  assert.equal(
+    buildInvestigationCsvFilename('Malicious', fixedNow),
+    'soti_investigation_malicious_20261115_041509.csv',
+  );
 });

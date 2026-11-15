@@ -13,6 +13,7 @@ export interface IndicatorFileSummary {
 
 interface IndicatorFileUploadProps {
   summary: IndicatorFileSummary | null;
+  fileInputRef?: React.RefObject<HTMLInputElement | null>;
   onIndicatorsExtracted: (summary: IndicatorFileSummary) => void;
   onError: (message: string) => void;
   onDismissSummary: () => void;
@@ -20,11 +21,13 @@ interface IndicatorFileUploadProps {
 
 export function IndicatorFileUpload({
   summary,
+  fileInputRef,
   onIndicatorsExtracted,
   onError,
   onDismissSummary,
 }: IndicatorFileUploadProps) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const internalInputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = fileInputRef ?? internalInputRef;
   const [dragging, setDragging] = useState(false);
 
   async function processFile(file: File | undefined | null) {

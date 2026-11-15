@@ -1,18 +1,25 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   ClipboardList,
+  Copy,
+  Download,
   ExternalLink,
   HelpCircle,
   Search,
   Settings2,
   ShieldAlert,
+  Sparkles,
+  Upload,
   X,
   XCircle,
 } from 'lucide-react';
 import {
-  parseIndicators,
+  buildInvestigationCsvFilename,
+  preprocessInputForLookup,
+  serializeResultsToCsv,
   type LookupResult,
   type SourceSelection,
   type Verdict,
@@ -27,7 +34,21 @@ import {
   IndicatorFileUpload,
   type IndicatorFileSummary,
 } from './IndicatorFileUpload';
+import { RecentInvestigationsSidebar } from './RecentInvestigationsSidebar';
+import { IocNetworkGraph } from './IocNetworkGraph';
+import {
+  buildRecentInvestigationEntry,
+  clearRecentInvestigations,
+  loadRecentInvestigations,
+  prependRecentInvestigation,
+  removeRecentInvestigation,
+  saveRecentInvestigations,
+  type RecentInvestigationEntry,
+} from '../utils/investigationHistory';
+import { formatIocClipboardText, formatIocGroupClipboardText } from '../utils/iocGraph';
+import { copyToClipboard } from '../utils/clipboard';
 import { getQuotaWarningProviders } from '../utils/quota';
+import type { ThemeMode } from '../utils/theme';
 import type { QuotaState } from '../App';
 
 export interface QuotaSkippedEntry {
@@ -51,14 +72,23 @@ export interface InvestigationState {
   lastRunMode: 'sample' | 'live' | null;
 }
 
+export interface InvestigateNavigationTarget {
+  indicator?: string;
+  historyEntryId?: string;
+  nonce: number;
+}
+
 interface InvestigateViewProps {
   state: InvestigationState;
   apiSettings: ApiSettings;
   quota: QuotaState;
+  theme?: ThemeMode;
   onChangeState: (updater: (prev: InvestigationState) => InvestigationState) => void;
   onQuotaChange: (next: QuotaState) => void;
   onReportCreated: (reportFile: string) => void;
   onOpenApiConfig: () => void;
+  navigationTarget?: InvestigateNavigationTarget | null;
+  onRecentHistoryChange?: (entries: RecentInvestigationEntry[]) => void;
 }
 
 const CORE_LABELS: Record<string, string> = {
@@ -141,18 +171,71 @@ export function InvestigateView({
   state,
   apiSettings,
   quota,
+  theme = 'light',
   onChangeState,
   onQuotaChange,
   onReportCreated,
   onOpenApiConfig,
+  navigationTarget,
+  onRecentHistoryChange,
 }: InvestigateViewProps) {
   const [verdictFilter, setVerdictFilter] = useState<'All' | Verdict>('All');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [dismissedQuotaSignature, setDismissedQuotaSignature] = useState<string | null>(null);
   const [fileImportSummary, setFileImportSummary] = useState<IndicatorFileSummary | null>(null);
+  const [recentHistory, setRecentHistory] = useState<RecentInvestigationEntry[]>(() =>
+    typeof window !== 'undefined' ? loadRecentInvestigations(window.localStorage) : [],
+  );
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [graphFocusedIndicator, setGraphFocusedIndicator] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const csvFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const parsedPreview = useMemo(() => parseIndicators(state.rawInput), [state.rawInput]);
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveRecentInvestigations(window.localStorage, recentHistory);
+    }
+    onRecentHistoryChange?.(recentHistory);
+  }, [recentHistory, onRecentHistoryChange]);
+
+  useEffect(() => {
+    if (!navigationTarget) return;
+    setVerdictFilter('All');
+    setGraphFocusedIndicator(null);
+    if (navigationTarget.historyEntryId) {
+      const match = recentHistory.find((item) => item.id === navigationTarget.historyEntryId);
+      if (match) {
+        handleViewRecentDetails(match);
+        return;
+      }
+    }
+    if (navigationTarget.indicator) {
+      const inCurrent = state.results.some(
+        (r) => r.indicator.toLowerCase() === navigationTarget.indicator?.toLowerCase(),
+      );
+      if (!inCurrent) {
+        onChangeState((prev) => ({ ...prev, rawInput: navigationTarget.indicator || prev.rawInput }));
+      } else {
+        setGraphFocusedIndicator(navigationTarget.indicator);
+      }
+    }
+  }, [navigationTarget?.nonce]);
+
+  const preprocessedInput = useMemo(
+    () => preprocessInputForLookup(state.rawInput),
+    [state.rawInput],
+  );
+  const parsedPreview = preprocessedInput.parsed;
   const enabledSourceIds = useMemo(() => getAllEnabledProviderIds(apiSettings), [apiSettings]);
 
   const warningProviders = useMemo(
@@ -263,29 +346,49 @@ export function InvestigateView({
     return Array.from(groups.values());
   }, [filteredResults]);
 
-  async function handleRunLookup(e: React.FormEvent) {
-    e.preventDefault();
+  async function runEnrichment(override?: {
+    rawInput: string;
+    source: SourceSelection;
+    customSources: string[];
+    useCustomSources: boolean;
+    mode: 'sample' | 'live';
+  }) {
     setErrorMsg(null);
 
-    if (!state.rawInput.trim()) {
+    const targetRawInput = override ? override.rawInput : state.rawInput;
+    const targetSource = override ? override.source : state.source;
+    const targetCustomSources = override ? override.customSources : state.customSources;
+    const targetUseCustomSources = override ? override.useCustomSources : state.useCustomSources;
+    const targetMode = override ? override.mode : state.mode;
+    const targetEffectiveSources = targetUseCustomSources
+      ? targetCustomSources
+      : targetSource === 'all'
+        ? enabledSourceIds
+        : [targetSource];
+
+    if (!targetRawInput.trim()) {
       setErrorMsg('Enter at least one IP, domain, or file hash (MD5, SHA1, or SHA256).');
       return;
     }
 
-    if (effectiveSources.length === 0) {
+    if (targetEffectiveSources.length === 0) {
       setErrorMsg('Select at least one intelligence API to run enrichment.');
       return;
     }
 
+    // Automatically detect & strip common defang patterns before sending to API providers
+    const targetPreprocessed = preprocessInputForLookup(targetRawInput);
+    const dispatchRaw = targetPreprocessed.apiReadyInput || targetRawInput.trim();
+
     setLoading(true);
     try {
       const payload: Record<string, unknown> = {
-        raw: state.rawInput,
-        source: state.source,
-        mode: state.mode,
+        raw: dispatchRaw,
+        source: targetSource,
+        mode: targetMode,
       };
-      if (state.useCustomSources) {
-        payload.sources = state.customSources;
+      if (targetUseCustomSources) {
+        payload.sources = targetCustomSources;
       }
       const resp = await fetch('/api/lookup', {
         method: 'POST',
@@ -301,25 +404,142 @@ export function InvestigateView({
         return;
       }
 
+      const nextResults: LookupResult[] = data.results || [];
+      const nextInvalid: string[] = data.invalid || [];
+      const nextQuotaSkipped: QuotaSkippedEntry[] = Array.isArray(data.quotaSkipped)
+        ? data.quotaSkipped
+        : [];
+      const nextReportFile: string | null = data.reportFile || null;
+      const resolvedMode: 'sample' | 'live' = data.mode || targetMode;
+
       onChangeState((prev) => ({
         ...prev,
-        results: data.results || [],
-        invalidTokens: data.invalid || [],
-        quotaSkipped: Array.isArray(data.quotaSkipped) ? data.quotaSkipped : [],
-        lastReportFile: data.reportFile || null,
-        lastRunMode: data.mode || prev.mode,
+        rawInput: targetRawInput,
+        source: targetSource,
+        customSources: targetCustomSources,
+        useCustomSources: targetUseCustomSources,
+        mode: targetMode,
+        results: nextResults,
+        invalidTokens: nextInvalid,
+        quotaSkipped: nextQuotaSkipped,
+        lastReportFile: nextReportFile,
+        lastRunMode: resolvedMode,
       }));
       if (data.quota?.date && Array.isArray(data.quota?.providers)) {
         onQuotaChange(data.quota);
       }
       setVerdictFilter('All');
-      if (data.reportFile) {
-        onReportCreated(data.reportFile);
+      setGraphFocusedIndicator(null);
+
+      const entry = buildRecentInvestigationEntry({
+        rawInput: targetRawInput,
+        normalizedInput: dispatchRaw,
+        indicators: targetPreprocessed.validIndicators.map((v) => v.cleaned),
+        source: targetSource,
+        customSources: targetCustomSources,
+        useCustomSources: targetUseCustomSources,
+        sourceLabels: targetEffectiveSources.map((id) => providerNameMap[id] || id),
+        mode: resolvedMode,
+        results: nextResults,
+        invalidTokens: nextInvalid,
+        quotaSkipped: nextQuotaSkipped,
+        reportFile: nextReportFile,
+      });
+      setRecentHistory((prev) => prependRecentInvestigation(prev, entry));
+      setActiveHistoryId(entry.id);
+
+      if (nextReportFile) {
+        onReportCreated(nextReportFile);
       }
     } catch {
       setErrorMsg('Unable to reach the enrichment backend.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleRunLookup(e: React.FormEvent) {
+    e.preventDefault();
+    await runEnrichment();
+  }
+
+  function handleViewRecentDetails(entry: RecentInvestigationEntry) {
+    setErrorMsg(null);
+    setFileImportSummary(null);
+    setActiveHistoryId(entry.id);
+    setVerdictFilter('All');
+    setGraphFocusedIndicator(null);
+    onChangeState((prev) => ({
+      ...prev,
+      rawInput: entry.rawInput,
+      source: entry.source,
+      customSources: entry.customSources,
+      useCustomSources: entry.useCustomSources,
+      mode: entry.mode,
+      results: entry.results,
+      invalidTokens: entry.invalidTokens,
+      quotaSkipped: entry.quotaSkipped,
+      lastReportFile: entry.reportFile,
+      lastRunMode: entry.mode,
+    }));
+  }
+
+  async function handleRerunRecent(entry: RecentInvestigationEntry) {
+    setFileImportSummary(null);
+    setActiveHistoryId(entry.id);
+    onChangeState((prev) => ({
+      ...prev,
+      rawInput: entry.rawInput,
+      source: entry.source,
+      customSources: entry.customSources,
+      useCustomSources: entry.useCustomSources,
+      mode: entry.mode,
+    }));
+    await runEnrichment({
+      rawInput: entry.rawInput,
+      source: entry.source,
+      customSources: entry.customSources,
+      useCustomSources: entry.useCustomSources,
+      mode: entry.mode,
+    });
+  }
+
+  function handleRemoveRecent(id: string) {
+    setRecentHistory((prev) => removeRecentInvestigation(prev, id));
+    setActiveHistoryId((prev) => (prev === id ? null : prev));
+  }
+
+  function handleClearRecent() {
+    setRecentHistory([]);
+    setActiveHistoryId(null);
+    if (typeof window !== 'undefined') {
+      clearRecentInvestigations(window.localStorage);
+    }
+  }
+
+  function handleExportResultsCsv() {
+    if (filteredResults.length === 0) return;
+    const csvContent = serializeResultsToCsv(filteredResults, new Date().toISOString());
+    const filename = buildInvestigationCsvFilename(verdictFilter);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function triggerClipboardCopy(text: string, key: string) {
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(key);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => setCopiedKey(null), 2000);
     }
   }
 
@@ -369,7 +589,9 @@ export function InvestigateView({
         </div>
       )}
 
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6">
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="min-w-0 space-y-6">
+          <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50 text-balance">
@@ -461,6 +683,33 @@ export function InvestigateView({
               </label>
 
               <div className="flex flex-wrap items-center gap-3 shrink-0">
+                {preprocessedInput.detectedPatterns.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="strip-defang-button"
+                    onClick={() => {
+                      if (preprocessedInput.apiReadyInput) {
+                        onChangeState((prev) => ({
+                          ...prev,
+                          rawInput: preprocessedInput.apiReadyInput,
+                        }));
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 dark:text-red-400 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                    Strip defangs
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-testid="import-csv-button"
+                  onClick={() => csvFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                >
+                  <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                  Import CSV
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -487,27 +736,43 @@ export function InvestigateView({
 
           <IndicatorFileUpload
             summary={fileImportSummary}
+            fileInputRef={csvFileInputRef}
             onIndicatorsExtracted={handleFileExtracted}
             onError={handleFileError}
             onDismissSummary={() => setFileImportSummary(null)}
           />
 
           {parsedPreview.length > 0 && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-slate-600 dark:text-slate-400">
-              <span className="font-medium text-slate-500 dark:text-slate-400">Detected ({parsedPreview.length}):</span>
-              {parsedPreview.slice(0, 12).map((item, idx) => (
-                <span key={`${item.cleaned}-${idx}`} className="inline-flex items-center gap-1.5 font-mono">
-                  <span className={item.type ? 'text-slate-900 dark:text-slate-100' : 'text-red-600 dark:text-red-400 line-through'}>
-                    {item.cleaned}
+            <div className="space-y-1.5" data-testid="detected-indicators-preview">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-slate-600 dark:text-slate-400">
+                <span className="font-medium text-slate-500 dark:text-slate-400">Detected ({parsedPreview.length}):</span>
+                {parsedPreview.slice(0, 12).map((item, idx) => (
+                  <span key={`${item.cleaned}-${idx}`} className="inline-flex items-center gap-1.5 font-mono">
+                    <span className={item.type ? 'text-slate-900 dark:text-slate-100' : 'text-red-600 dark:text-red-400 line-through'}>
+                      {item.cleaned}
+                    </span>
+                    <span className="text-slate-400 dark:text-slate-600">/</span>
+                    <span className={item.type ? 'text-slate-600 dark:text-slate-400' : 'text-red-600 dark:text-red-400'}>
+                      {item.type ?? 'invalid'}
+                    </span>
                   </span>
-                  <span className="text-slate-400 dark:text-slate-600">/</span>
-                  <span className={item.type ? 'text-slate-600 dark:text-slate-400' : 'text-red-600 dark:text-red-400'}>
-                    {item.type ?? 'invalid'}
+                ))}
+                {parsedPreview.length > 12 && (
+                  <span className="font-mono text-slate-500 dark:text-slate-400">+{parsedPreview.length - 12} more</span>
+                )}
+              </div>
+
+              {preprocessedInput.detectedPatterns.length > 0 && (
+                <p
+                  data-testid="defang-detection-note"
+                  className="text-[11px] text-slate-500 dark:text-slate-400"
+                >
+                  Defang patterns detected (
+                  <span className="font-mono text-slate-700 dark:text-slate-300">
+                    {preprocessedInput.detectedPatterns.join(', ')}
                   </span>
-                </span>
-              ))}
-              {parsedPreview.length > 12 && (
-                <span className="font-mono text-slate-500 dark:text-slate-400">+{parsedPreview.length - 12} more</span>
+                  ) — automatically stripped before sending to API providers.
+                </p>
               )}
             </div>
           )}
@@ -662,31 +927,45 @@ export function InvestigateView({
       {state.results.length > 0 ? (
         <section className="space-y-6">
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-            <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-800 px-5 py-4 sm:flex-row sm:items-center sm:justify-between md:px-6">
-              <div>
+            <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-800 px-5 py-4 lg:flex-row lg:items-center lg:justify-between md:px-6">
+              <div className="min-w-0">
                 <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">Summary Matrix</h2>
-                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
                   {state.results.length} lookup{state.results.length === 1 ? '' : 's'}
                   {state.lastRunMode ? ` · ${state.lastRunMode === 'sample' ? 'Sample Data' : 'Live API'}` : ''}
                   {state.lastReportFile ? ` · Saved to reports/${state.lastReportFile}` : ''}
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1" role="group" aria-label="Filter by verdict">
-                {VERDICT_FILTERS.map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() => setVerdictFilter(v)}
-                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      verdictFilter === v
-                        ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
-                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
-                    }`}
-                  >
-                    {v}
-                  </button>
-                ))}
+              <div className="flex flex-wrap items-center gap-2.5 sm:flex-nowrap shrink-0">
+                <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1" role="group" aria-label="Filter by verdict">
+                  {VERDICT_FILTERS.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => setVerdictFilter(v)}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        verdictFilter === v
+                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="export-results-csv-button"
+                  disabled={filteredResults.length === 0}
+                  onClick={handleExportResultsCsv}
+                  aria-label="Export current investigation results to CSV"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                >
+                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                  Export to CSV
+                </button>
               </div>
             </div>
 
@@ -699,31 +978,62 @@ export function InvestigateView({
                     <th className="px-4 py-3">Source</th>
                     <th className="px-4 py-3">Verdict</th>
                     <th className="px-4 py-3 text-right">Score</th>
-                    <th className="px-6 py-3">Summary</th>
+                    <th className="px-4 py-3">Summary</th>
+                    <th className="px-6 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {filteredResults.map((r, i) => (
-                    <tr key={`${r.indicator}-${r.sourceId}-${i}`} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
-                      <td className="px-6 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100 break-all">
-                        {r.indicator}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">{r.type}</td>
-                      <td className="px-4 py-3 text-xs font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">
-                        {r.source}
-                      </td>
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        <VerdictIndicator verdict={r.verdict} status={r.status} />
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
-                        {r.score}
-                      </td>
-                      <td className="px-6 py-3 text-xs text-slate-600 dark:text-slate-300">{r.summary}</td>
-                    </tr>
-                  ))}
+                  {filteredResults.map((r, i) => {
+                    const rowKey = `row:${r.indicator}:${r.sourceId}:${i}`;
+                    const isCopied = copiedKey === rowKey;
+                    return (
+                      <tr key={rowKey} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
+                        <td className="px-6 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100 break-all">
+                          {r.indicator}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-400">{r.type}</td>
+                        <td className="px-4 py-3 text-xs font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                          {r.source}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <VerdictIndicator verdict={r.verdict} status={r.status} />
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
+                          {r.score}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">{r.summary}</td>
+                        <td className="px-6 py-3 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            data-testid="copy-ioc-button"
+                            onClick={() => triggerClipboardCopy(formatIocClipboardText(r), rowKey)}
+                            aria-label={`Copy ${r.indicator} (${r.source}) to clipboard`}
+                            title="Copy to clipboard"
+                            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              isCopied
+                                ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
+                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700'
+                            }`}
+                          >
+                            {isCopied ? (
+                              <>
+                                <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                Copied
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                Copy
+                              </>
+                            )}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {filteredResults.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                      <td colSpan={7} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
                         No results match the selected verdict filter.
                       </td>
                     </tr>
@@ -733,19 +1043,58 @@ export function InvestigateView({
             </div>
           </div>
 
+          <IocNetworkGraph
+            results={filteredResults}
+            theme={theme}
+            focusedIndicator={graphFocusedIndicator}
+            onFocusIndicatorChange={setGraphFocusedIndicator}
+          />
+
           <div className="space-y-6">
-            {groupedByIndicator.map((group) => (
+            {groupedByIndicator.map((group) => {
+              const groupKey = `group:${group.indicator}`;
+              const isGroupCopied = copiedKey === groupKey;
+              return (
               <div key={group.indicator} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6">
-                <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-4">
                   <div className="flex items-baseline gap-3">
                     <h3 className="font-mono text-base font-semibold text-slate-950 dark:text-slate-50 break-all">
                       {group.indicator}
                     </h3>
                     <span className="font-mono text-xs text-slate-500 dark:text-slate-400">{group.type}</span>
                   </div>
-                  <span className="text-xs text-slate-500 dark:text-slate-400">
-                    {group.items.length} source{group.items.length === 1 ? '' : 's'}
-                  </span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      {group.items.length} source{group.items.length === 1 ? '' : 's'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        triggerClipboardCopy(
+                          formatIocGroupClipboardText(group.indicator, group.type, group.items),
+                          groupKey,
+                        )
+                      }
+                      aria-label={`Copy full summary for ${group.indicator} to clipboard`}
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        isGroupCopied
+                          ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {isGroupCopied ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          Copy IOC
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-4 grid gap-6 md:grid-cols-3">
@@ -786,7 +1135,8 @@ export function InvestigateView({
                   ))}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       ) : (
@@ -797,6 +1147,20 @@ export function InvestigateView({
           </p>
         </section>
       )}
+        </div>
+
+        <div className="lg:sticky lg:top-20">
+          <RecentInvestigationsSidebar
+            entries={recentHistory}
+            activeEntryId={activeHistoryId}
+            isRunning={loading}
+            onViewDetails={handleViewRecentDetails}
+            onRerun={handleRerunRecent}
+            onRemoveEntry={handleRemoveRecent}
+            onClearAll={handleClearRecent}
+          />
+        </div>
+      </div>
     </div>
   );
 }
