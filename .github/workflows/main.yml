@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-cli:
+    name: Python CLI Lint & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "requirements.txt"
+
+      - name: Install Python dependencies and linter
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint and syntax-check Python CLI
+        run: |
+          ruff check main.py api config tests --select=E9,F63,F7,F82
+          python -m py_compile main.py api/*.py config/*.py tests/*.py
+
+      - name: Run Python CLI unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Smoke test CLI demo execution
+        run: python main.py --source all --indicators "8.8.8.8, evil[.]com" --demo --json
+
+  react-frontend:
+    name: React Frontend Lint, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node.js dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Type-check React and server codebase
+        run: npm run lint
+
+      - name: Run TypeScript unit tests
+        run: npx --yes tsx --test src/utils/*.test.ts
+
+      - name: Build production frontend bundle
+        run: npm run build

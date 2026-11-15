@@ -1,68 +1,64 @@
-# SoTI — ابزار جامع هوش تهدید و ارزیابی IOC
+# SoTI — Threat Intelligence Enrichment CLI & SOC Workbench
 
-**SoTI (Threat Intelligence Enrichment & IOC Assessment Workbench)** یک ابزار حرفه‌ای تحلیل و غنی‌سازی شاخص‌های تهدید (**IPv4/IPv6**، **Domain**، **URL** و هش‌های **MD5 / SHA1 / SHA256**) در دو نسخهٔ **خط فرمان (Python CLI)** و **وب‌داشبورد تعاملی (SOC Web Workbench)** است.
+**SoTI (Threat Intelligence Enrichment & IOC Assessment Workbench)** is a threat intelligence enrichment and indicator-of-compromise (IOC) triage platform available as both a **Python CLI** and an interactive **React + Express SOC Web Workbench**. It supports normal and defanged **IPv4/IPv6 addresses, domains, URLs, and file hashes** (`MD5`, `SHA1`, `SHA256`) across **VirusTotal**, **AbuseIPDB**, **AlienVault OTX**, and configurable backup/custom threat intelligence providers.
 
-این پروژه توسط **Mohammad Hossein Sokhanfar** طراحی و توسعه داده شده است.  
-مخزن رسمی: [https://github.com/MHSokhanfar/SoTI](https://github.com/MHSokhanfar/SoTI)
+**Created and developed by Mohammad Hossein Sokhanfar**  
+Repository: [https://github.com/MHSokhanfar/SoTI](https://github.com/MHSokhanfar/SoTI)
 
 ---
 
-## ۱. پیش‌نیازها (Prerequisites)
+## 1. Prerequisites
 
-پیش از شروع نصب، از نصب بودن ابزارهای زیر روی سیستم خود اطمینان حاصل کنید:
+Ensure the following tools are installed on your machine before setting up the project:
 
-| پیش‌نیاز | نسخه پیشنهادی | کاربرد |
+| Prerequisite | Recommended Version | Purpose |
 | :--- | :--- | :--- |
-| **Git** | `2.30+` | دریافت کدهای مخزن از GitHub |
-| **Python** | `3.10` یا بالاتر + `pip` | اجرای نسخهٔ CLI (`main.py`) و تست‌های پایتون |
-| **Node.js & npm** | `Node.js 18+` (ترجیحاً `20 LTS`) | اجرای وب‌داشبورد React/Vite و سرور Express (`server.ts`) |
-| **کلیدهای API** | رایگان / استاندارد | اتصال به VirusTotal، AbuseIPDB و AlienVault OTX (در حالت `--demo` یا `Sample Data` اختیاری است) |
+| **Git** | `2.30+` | Clone the repository from GitHub |
+| **Python** | `3.10+` with `pip` | Run the Python CLI (`main.py`) and Python unit tests |
+| **Node.js & npm** | `Node.js 18+` (`20 LTS` preferred) | Run the React/Vite frontend, Express backend (`server.ts`), and TypeScript tests |
+| **API Keys** | Free or standard tier | Live lookups against VirusTotal, AbuseIPDB, and AlienVault OTX *(optional for offline `--demo` / `Sample Data` mode)* |
 
 ---
 
-## ۲. مراحل نصب (Installation)
+## 2. Installation
 
-### گام ۱: دریافت مخزن (Git Clone)
-ترمینال (Terminal / Command Prompt / PowerShell) را باز کرده و پروژه را کلون کنید:
-
+### Step 1: Clone the Repository
 ```bash
 git clone https://github.com/MHSokhanfar/SoTI.git
 cd SoTI
 ```
 
-### گام ۲: ساخت و فعال‌سازی محیط مجازی پایتون (Virtual Environment)
-برای ایزوله‌سازی وابستگی‌های پایتون، یک محیط مجازی بسازید و فعال کنید:
-
-- **لینوکس و مک (Linux / macOS):**
+### Step 2: Create and Activate a Python Virtual Environment
+- **Linux / macOS:**
   ```bash
   python3 -m venv venv
   source venv/bin/activate
   ```
 
-- **ویندوز — Command Prompt (CMD):**
+- **Windows — Command Prompt (CMD):**
   ```cmd
   python -m venv venv
   venv\Scripts\activate.bat
   ```
 
-- **ویندوز — PowerShell:**
+- **Windows — PowerShell:**
   ```powershell
   python -m venv venv
   .\venv\Scripts\Activate.ps1
   ```
-  > **نکته ویندوز:** در صورت مشاهده خطای Execution Policy در PowerShell، یک بار دستور زیر را اجرا کنید و دوباره فعال‌سازی را انجام دهید:
+  > **Windows Note:** If PowerShell blocks script execution, allow local scripts once for your user and re-run activation:
   > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
-### گام ۳: نصب پکیج‌های پایتون (`requirements.txt`)
-پس از فعال‌شدن محیط مجازی `(venv)`، وابستگی‌های نسخهٔ CLI (`requests`، `python-dotenv` و `rich`) را نصب کنید:
+### Step 3: Install Python Dependencies (`requirements.txt`)
+With the virtual environment `(venv)` active, install the CLI dependencies (`requests`, `python-dotenv`, `rich`):
 
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### گام ۴: نصب وابستگی‌های وب‌داشبورد (اختیاری — برای نسخهٔ Web UI)
-اگر قصد استفاده از داشبورد تحت وب را دارید، پکیج‌های Node.js را نیز نصب کنید:
+### Step 4: Install Web Workbench Dependencies (Optional — for Web UI)
+If you plan to run the SOC Web Dashboard, install the Node.js dependencies:
 
 ```bash
 npm install
@@ -70,99 +66,101 @@ npm install
 
 ---
 
-## ۳. تنظیمات کلیدهای API (Configuration)
+## 3. API Configuration
 
-### گام ۱: ایجاد فایل `.env` از روی `.env.example`
-- **لینوکس و مک:**
+### Step 1: Copy `.env.example` to `.env`
+- **Linux / macOS:**
   ```bash
   cp .env.example .env
   ```
-- **ویندوز (CMD / PowerShell):**
+- **Windows (CMD / PowerShell):**
   ```cmd
   copy .env.example .env
   ```
 
-### گام ۲: وارد کردن کلیدهای API
-فایل `.env` را با ویرایشگر متن باز کرده و کلیدهای دریافت‌شده از ارائه‌دهندگان هوش تهدید را قرار دهید:
+### Step 2: Add Your API Keys
+Open `.env` in your editor and configure your threat intelligence API keys:
 
 ```env
-# کلیدهای اصلی مورد استفاده در CLI و وب‌داشبورد
+# Primary Threat Intelligence API Keys (Python CLI & Web Workbench)
 VT_API_KEY=your_virustotal_api_key
 ABUSEIPDB_API_KEY=your_abuseipdb_api_key
 OTX_API_KEY=your_alienvault_otx_api_key
 
-# کلیدهای ارائه‌دهندگان تکمیلی (اختیاری)
+# Optional Additional Threat Intelligence Providers
 SHODAN_API_KEY=your_shodan_api_key
 THREATFOX_AUTH_KEY=your_threatfox_auth_key
 URLSCAN_API_KEY=your_urlscan_api_key
 ```
 
-> **نکات امنیتی و سهمیه:**
-> - فایل `.env` در `.gitignore` قرار دارد و هرگز نباید در مخزن Git کامیت شود.
-> - در وب‌داشبورد می‌توانید وضعیت اتصال و کلیدها را از تب **CLI & APIs** نیز مدیریت کنید و از دکمهٔ **Help** برای مشاهدهٔ مستندات دریافت کلید هر سرویس کمک بگیرید.
+> **Security & Quota Notes:**
+> - `.env` is listed in `.gitignore` and must never be committed to version control.
+> - Inside the Web Workbench, you can inspect API health, enable backup/custom providers, and view setup instructions via the **CLI & APIs** tab and the **Help** modal.
+> - Automatic daily quota failover tracks provider usage and seamlessly falls back to healthy active providers if an API reaches its daily limit or returns `HTTP 429`.
 
 ---
 
-## ۴. نحوه اجرا (Usage & Execution)
+## 4. Usage & Execution
 
-### الف) اجرای نسخهٔ خط فرمان (Python CLI — `main.py`)
+### A. Python CLI (`main.py`)
 
-#### ۱. حالت تعاملی (Interactive Menu)
-برای ورود به منوی تعاملی ترمینال:
+#### 1. Interactive Menu Mode
 ```bash
+# Live API lookups
 python main.py
-```
-و برای اجرای تعاملی آفلاین با داده‌های نمونه (بدون مصرف سهمیهٔ API):
-```bash
+
+# Offline deterministic demo mode (no API quota consumed)
 python main.py --demo
 ```
 
-#### ۲. حالت دستور مستقیم (Non-Interactive)
-از شاخص‌های عادی یا خنثی‌سازی‌شده (**Defanged IOCs**) مانند `1[.]2[.]3[.]4` و `hxxp://evil[.]com` پشتیبانی می‌شود:
+#### 2. Non-Interactive CLI Commands
+SoTI automatically refangs defanged indicators (such as `1[.]2[.]3[.]4` and `hxxp://evil[.]com`):
 
 ```bash
-# بررسی یک یا چند شاخص هم‌زمان در تمام منابع
+# Query multiple indicators across all configured sources
 python main.py --source all --indicators "1[.]2[.]3[.]4, hxxp://evil[.]com, 44d88612fea8a8f36de82e1278abb02f"
 
-# استعلام یک IP صرفاً از VirusTotal
+# Query a single IP address using VirusTotal only
 python main.py --source vt --indicators 8.8.8.8
 
-# خواندن فهرست شاخص‌ها از فایل متنی
+# Load indicators from a text or CSV file
 python main.py --source all --file indicators.txt
 
-# اجرای آزمایشی با خروجی ماشینی JSON
+# Offline simulation with machine-readable JSON output
 python main.py --source all --indicators "8.8.8.8, evil[.]com" --demo --json
 ```
 
-#### ۳. مدیریت بررسی‌های زمان‌بندی‌شده (Scheduled Checks)
+#### 3. Scheduled Checks via CLI
 ```bash
-# افزودن بررسی دوره‌ای هر ۶۰ دقیقه
+# Add a recurring check running every 60 minutes
 python main.py --add-schedule --schedule-name "Critical IOC Watch" --source all --indicators "1[.]2[.]3[.]4, evil[.]com" --interval 60
 
-# نمایش فهرست زمان‌بندی‌ها
+# List all configured schedules
 python main.py --list-schedules
 
-# اجرای فوری وظایف سررسیدشده
+# Execute all currently due schedules
 python main.py --run-due
 
-# حذف یک زمان‌بندی با شناسه
+# Remove a scheduled job by ID
 python main.py --remove-schedule <SCHEDULE_ID>
 ```
 
 ---
 
-### ب) اجرای نسخهٔ وب‌داشبورد (Web Dashboard — `server.ts`)
+### B. SOC Web Workbench (`server.ts`)
 
-وب‌داشبورد **SoTI** شامل سرور یکپارچهٔ Express (`server.ts`) و رابط کاربری React + Vite است و از نماهای **Investigate** (آپلود فایل CSV/TXT و Failover خودکار سهمیه)، **Reports** (آمار سریع، نمودارها، تنظیم تراکم جدول، خروجی PDF و CSV تجمیعی)، **Scheduled**، **Logs** و **CLI & APIs** پشتیبانی می‌کند.
+The Web Workbench combines an Express API server (`server.ts`) with a React + TypeScript + Tailwind CSS interface featuring:
+- **Investigate**: Interactive IOC input, local browser-side `.csv`/`.txt` bulk upload, `Sample Data` / `Live API` mode switch, >80% quota warnings, and automatic quota failover.
+- **Reports**: Quick Stats KPIs, verdict distribution & 30-day alert charts, multi-source confidence scores, multi-report aggregated CSV export, print-ready **Download PDF**, configurable **Auto-refresh** (`60s` default), and table **Density** selector (`Compact`, `Normal`, `Spacious`).
+- **Scheduled**, **Logs**, **CLI & APIs**, Light/Dark theme toggle, **Help** modal, and an app-wide **Notification Center** (alerting at ≥90% daily quota usage).
 
-#### اجرای محیط توسعه (Development)
+#### Development Mode
 ```bash
 npm run dev
 ```
-سپس مرورگر خود را روی آدرس زیر باز کنید:  
-`http://localhost:3000`
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-#### اجرای نسخهٔ نهایی (Production Build)
+#### Production Build & Start
 ```bash
 npm run build
 npm start
@@ -170,51 +168,71 @@ npm start
 
 ---
 
-## ۵. ساختار پوشه‌ها و فایل‌ها (Directory Structure)
+## 5. Source Support & Default Verdict Thresholds
+
+| Source | IP | Domain | Hash | Malicious | Suspicious | Clean |
+| :--- | :---: | :---: | :---: | :--- | :--- | :--- |
+| **VirusTotal** | Yes | Yes | Yes | ≥ 5 engines | 1–4 malicious or any suspicious | 0 detections |
+| **AbuseIPDB** | Yes | No | No | Confidence ≥ 75% | 25–74% | < 25% |
+| **AlienVault OTX** | Yes | Yes | Yes | ≥ 5 pulses | 1–4 pulses | 0 pulses = `Unknown` |
+
+---
+
+## 6. Directory Structure
 
 ```text
 SoTI/
-├── api/                         # ماژول‌های ارتباط با API ارائه‌دهندگان (نسخه پایتون)
-│   ├── __init__.py              # نرمال‌سازی و تشخیص نوع IOC (IP / Domain / Hash)
-│   ├── virustotal.py            # رابط VirusTotal API v3
-│   ├── abuseipdb.py             # رابط AbuseIPDB API v2
-│   └── alienvault.py            # رابط AlienVault OTX API
-├── config/                      # تنظیمات مرکزی و فایل‌های وضعیت سیستم
-│   ├── settings.py              # مسیر پوشه‌ها، نسخه ابزار و پیکربندی پایه
-│   ├── scheduler.py             # موتور مدیریت و اجرای بررسی‌های زمان‌بندی‌شده
-│   ├── api_settings.json        # وضعیت فعال‌بودن و تنظیمات ارائه‌دهندگان وب
-│   ├── quota_usage.json         # دفترچه ردیابی سهمیه روزانه و Failover خودکار
-│   └── schedules.json           # فهرست زمان‌بندی‌های ذخیره‌شده
-├── logs/                        # پوشه ثبت وقایع و ممیزی سیستم (Audit Logs)
-│   └── soti.log                 # فایل گزارش رخدادهای اجرایی و خطاهای CLI/Backend
-├── reports/                     # پوشه ذخیره خودکار گزارش‌های خروجی
-│   └── soti_YYYYMMDD_HHMMSS.csv # فایل‌های گزارش CSV با رمزگذاری UTF-8-SIG (سازگار با Excel)
-├── src/                         # کد منبع رابط کاربری وب (React + TypeScript + Tailwind CSS)
-│   ├── App.tsx                  # لایه اصلی، تم روشن/تاریک و مرکز اعلان‌ها (NotificationCenter)
-│   ├── components/              # کامپوننت‌های داشبورد (Investigate, Reports, Scheduled, Logs, Help و ...)
-│   └── utils/                   # توابع خالص تحلیل، پارس CSV/TXT، محاسبه سهمیه و تست‌های واحد
-├── tests/                       # آزمون‌های خودکار نسخه پایتون
+├── .github/
+│   └── workflows/
+│       └── main.yml              # GitHub Actions CI for Python CLI & React frontend
+├── api/                          # Python threat intelligence provider clients
+│   ├── __init__.py               # IOC refanging & type classification (ip/domain/hash)
+│   ├── virustotal.py             # VirusTotal API v3 integration
+│   ├── abuseipdb.py              # AbuseIPDB API v2 integration
+│   └── alienvault.py             # AlienVault OTX integration
+├── config/                       # Configuration, scheduling, and runtime state
+│   ├── settings.py               # Central paths, version, and defaults
+│   ├── scheduler.py              # Recurring schedule engine
+│   ├── quota_usage.json          # Daily API quota ledger for automatic failover
+│   └── schedules.json            # Persisted scheduled IOC checks
+├── logs/                         # Runtime and audit logs (created automatically)
+│   └── soti.log                  # Enrichment & system audit log file
+├── reports/                      # Auto-saved CSV reports (created automatically)
+│   └── soti_YYYYMMDD_HHMMSS.csv  # UTF-8-SIG Excel-compatible enrichment exports
+├── src/                          # React + TypeScript + Tailwind CSS frontend
+│   ├── App.tsx                   # App shell, theme switcher, and Notification Center
+│   ├── components/               # Investigate, Reports, Scheduled, Logs, Help, CLI & APIs
+│   └── utils/                    # Pure analytics, parsers, quota helpers, & unit tests
+├── tests/                        # Python CLI unit tests
 │   └── test_soti.py
-├── main.py                      # نقطه ورود نسخهٔ خط فرمان (Python CLI)
-├── server.ts                    # سرور Express و APIهای بک‌اند داشبورد وب (پورت 3000)
-├── index.html                   # فایل ورودی وب‌اپلیکیشن
-├── requirements.txt             # وابستگی‌های پایتون
-├── package.json                 # وابستگی‌ها و اسکریپت‌های Node.js / Vite
-├── .env.example                 # الگوی استاندارد متغیرهای محیطی و کلیدهای API
-└── README.md                    # مستندات پروژه
+├── main.py                       # Python CLI entry point
+├── server.ts                     # Express backend & Vite server (port 3000)
+├── index.html                    # Web application entry document
+├── requirements.txt              # Python package requirements
+├── package.json                  # Node.js scripts and dependencies
+├── .env.example                  # Environment variable & API key template
+└── README.md                     # Project documentation
 ```
 
 ---
 
-## ۶. اجرای آزمون‌ها (Testing)
+## 7. Testing & CI Verification
 
-- **آزمون‌های واحد پایتون:**
-  ```bash
-  python -m unittest discover -s tests
-  ```
+Automated checks run on every push via `.github/workflows/main.yml`:
 
-- **آزمون‌های واحد TypeScript و بررسی تایپ‌ها:**
-  ```bash
-  npx --yes tsx --test src/utils/*.test.ts
-  npm run lint
-  ```
+```bash
+# Python CLI unit tests & syntax check
+python -m py_compile main.py api/*.py config/*.py tests/*.py
+python -m unittest discover -s tests -v
+
+# TypeScript unit tests, type check, and production build
+npx --yes tsx --test src/utils/*.test.ts
+npm run lint
+npm run build
+```
+
+---
+
+## Disclaimer
+
+For defensive security and SOC triage use only.

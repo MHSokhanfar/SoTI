@@ -41,12 +41,12 @@
     "enabled": true,
     "mode": "live",
     "createdAt": "2026-11-13T18:00:00Z",
-    "updatedAt": "2026-11-13T18:00:00Z",
-    "lastRunAt": null,
-    "nextRunAt": "2026-11-14T12:00:00Z",
-    "lastStatus": "idle",
-    "lastReportFile": null,
-    "lastSummary": "Scheduled check awaiting first execution",
-    "runCount": 0
+    "updatedAt": "2026-11-15T03:41:55Z",
+    "lastRunAt": "2026-11-15T03:41:55Z",
+    "nextRunAt": "2026-11-15T09:41:55Z",
+    "lastStatus": "success",
+    "lastReportFile": "soti_20261115_034155.csv",
+    "lastSummary": "6 checks completed (5 malicious, 0 suspicious)",
+    "runCount": 1
   }
 ]
