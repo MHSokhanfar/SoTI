@@ -1,4 +1,9 @@
 import type { LookupResult, Verdict } from './indicators';
+import { getTagsForIndicator, type IndicatorTagMap } from './iocTags';
+import {
+  extractResultLastSeen,
+  type ResultsSortState,
+} from './resultsTable';
 import {
   computeAllIocConfidenceScores,
   type ConfidenceRiskLevel,
@@ -88,6 +93,18 @@ export function buildResultsJsonFilename(
   return `soti_results${scope}_${stamp}.json`;
 }
 
+export function buildResultsTxtFilename(
+  verdictFilter: 'All' | Verdict = 'All',
+  now: Date = new Date(),
+): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const stamp =
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}_` +
+    `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+  const scope = verdictFilter === 'All' ? '' : `_${verdictFilter.toLowerCase()}`;
+  return `soti_report${scope}_${stamp}.txt`;
+}
+
 export function buildStructuredResultsJsonPayload(params: {
   allResults: LookupResult[];
   visibleResults: LookupResult[];
@@ -138,3 +155,96 @@ export function buildStructuredResultsJsonPayload(params: {
 export function serializeStructuredResultsJson(payload: StructuredResultsJsonPayload): string {
   return `${JSON.stringify(payload, null, 2)}\n`;
 }
+
+export function buildFormattedResultsTxtReport(params: {
+  allResults: LookupResult[];
+  visibleResults: LookupResult[];
+  verdictFilter?: 'All' | Verdict;
+  tagFilter?: string;
+  riskThreshold?: number;
+  sortState?: ResultsSortState | null;
+  indicatorTags?: IndicatorTagMap;
+  researcherNotes?: string;
+  mode?: 'sample' | 'live' | null;
+  now?: Date;
+}): string {
+  const now = params.now ?? new Date();
+  const verdictFilter = params.verdictFilter ?? 'All';
+  const tagFilter = params.tagFilter ?? 'All';
+  const riskThreshold = params.riskThreshold ?? 0;
+  const confidenceByIndicator = computeAllIocConfidenceScores(params.allResults);
+
+  const uniqueIndicators = Array.from(
+    new Set(params.visibleResults.map((r) => r.indicator.trim()).filter(Boolean)),
+  );
+  const verdictCounts: Record<Verdict, number> = {
+    Malicious: 0,
+    Suspicious: 0,
+    Clean: 0,
+    Unknown: 0,
+  };
+  for (const r of params.visibleResults) {
+    if (r.status === 'ok' && r.verdict in verdictCounts) {
+      verdictCounts[r.verdict] += 1;
+    }
+  }
+
+  const lines: string[] = [
+    '================================================================================',
+    'SoTI — THREAT INTELLIGENCE INVESTIGATION REPORT',
+    '================================================================================',
+    `Generated (UTC)  : ${now.toISOString().replace('T', ' ').slice(0, 19)} UTC`,
+    `Execution Mode   : ${params.mode === 'live' ? 'Live API' : params.mode === 'sample' ? 'Sample Data' : 'N/A'}`,
+    `Active Filters   : Verdict=${verdictFilter}, Tag=${tagFilter}, Risk>=${riskThreshold}`,
+    `Sort Order       : ${params.sortState ? `${params.sortState.key} (${params.sortState.direction.toUpperCase()})` : 'Default (Submission Order)'}`,
+    `Indicators Shown : ${uniqueIndicators.length} unique (${params.visibleResults.length} provider rows)`,
+    `Verdict Summary  : Malicious=${verdictCounts.Malicious} | Suspicious=${verdictCounts.Suspicious} | Clean=${verdictCounts.Clean} | Unknown=${verdictCounts.Unknown}`,
+    '================================================================================',
+    '',
+    'ENRICHMENT FINDINGS',
+    '--------------------------------------------------------------------------------',
+  ];
+
+  if (params.visibleResults.length === 0) {
+    lines.push('No lookup rows match the active filters.');
+  } else {
+    params.visibleResults.forEach((row, idx) => {
+      const conf = confidenceByIndicator.get(row.indicator.trim().toLowerCase());
+      const lastSeen = extractResultLastSeen(row);
+      const tags = params.indicatorTags ? getTagsForIndicator(params.indicatorTags, row.indicator) : [];
+      const riskText =
+        conf && conf.confidenceScore !== null
+          ? `${conf.confidenceScore}/100 (${conf.riskLevel})`
+          : 'N/A';
+
+      lines.push(
+        `[${idx + 1}] ${row.indicator} (${row.type.toUpperCase()}) — ${row.source}`,
+      );
+      lines.push(
+        `    Verdict   : ${row.status === 'ok' ? row.verdict : row.status.toUpperCase()} | Risk Score: ${riskText} | Score: ${row.score || 'N/A'}`,
+      );
+      lines.push(`    Last Seen : ${lastSeen.displayUtc}`);
+      if (tags.length > 0) {
+        lines.push(`    Tags      : ${tags.join(', ')}`);
+      }
+      lines.push(`    Summary   : ${row.summary || 'No summary provided.'}`);
+      if (row.link) {
+        lines.push(`    Reference : ${row.link}`);
+      }
+      lines.push('');
+    });
+  }
+
+  const trimmedNotes = (params.researcherNotes || '').trim();
+  if (trimmedNotes) {
+    lines.push('RESEARCHER NOTES');
+    lines.push('--------------------------------------------------------------------------------');
+    lines.push(trimmedNotes);
+    lines.push('');
+  }
+
+  lines.push('================================================================================');
+  lines.push('End of SoTI Investigation Report');
+  return `${lines.join('\n')}\n`;
+}
+

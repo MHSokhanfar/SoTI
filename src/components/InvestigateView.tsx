@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Check,
   CheckCircle2,
+  ChevronDown,
   ClipboardCopy,
   ClipboardList,
   Clock,
@@ -12,9 +16,11 @@ import {
   Eye,
   FileJson,
   FilePenLine,
+  FileText,
   HelpCircle,
   Layers,
   Mail,
+  Printer,
   Radio,
   RefreshCw,
   Save,
@@ -122,11 +128,34 @@ import {
   serializeExportedSessionJson,
 } from '../utils/sessionExport';
 import {
+  createEmptyNotesAutoSaveState,
+  formatAutoSaveUtcTimestamp,
+  loadNotesAutoSaveState,
+  NOTES_AUTOSAVE_DEBOUNCE_MS,
+  NOTES_AUTOSAVE_INTERVAL_MS,
+  removeEntryFromAutoSaveDrafts,
+  resolveRestoredNotesForEntry,
+  saveNotesAutoSaveState,
+  upsertNotesAutoSaveDraft,
+  type NotesAutoSaveState,
+} from '../utils/notesAutoSave';
+import {
+  buildFormattedResultsTxtReport,
   buildResultsJsonFilename,
+  buildResultsTxtFilename,
   buildStructuredResultsJsonPayload,
   CONFIDENCE_SCORE_LEGEND,
   serializeStructuredResultsJson,
 } from '../utils/resultsExport';
+import {
+  buildLastSeenByIndicatorMap,
+  extractResultLastSeen,
+  sortLookupResults,
+  sortUnifiedBatchRows,
+  toggleResultsSortState,
+  type ResultsSortKey,
+  type ResultsSortState,
+} from '../utils/resultsTable';
 import { copyToClipboard } from '../utils/clipboard';
 import { getQuotaWarningProviders } from '../utils/quota';
 import {
@@ -292,6 +321,73 @@ function getConfidenceToneClass(level: ConfidenceRiskLevel): string {
   }
 }
 
+interface SortableColumnHeaderProps {
+  label: string;
+  sortKey: ResultsSortKey;
+  sortState: ResultsSortState | null;
+  onSort: (key: ResultsSortKey) => void;
+  align?: 'left' | 'right';
+  title?: string;
+  className?: string;
+}
+
+function SortableColumnHeader({
+  label,
+  sortKey,
+  sortState,
+  onSort,
+  align = 'left',
+  title,
+  className = '',
+}: SortableColumnHeaderProps) {
+  const isActive = sortState?.key === sortKey;
+  const ariaSort = isActive
+    ? sortState.direction === 'asc'
+      ? 'ascending'
+      : 'descending'
+    : 'none';
+  return (
+    <th
+      aria-sort={ariaSort}
+      title={title || `Click to sort by ${label}`}
+      className={className}
+    >
+      <button
+        type="button"
+        data-testid={`sort-col-${sortKey}`}
+        onClick={() => onSort(sortKey)}
+        className={`group inline-flex items-center gap-0.5 font-semibold transition-colors whitespace-nowrap select-none cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200 ${
+          align === 'right' ? 'justify-end ml-auto' : ''
+        } ${
+          isActive
+            ? 'text-slate-950 dark:text-white'
+            : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+        }`}
+      >
+        <span>{label}</span>
+        {isActive ? (
+          sortState.direction === 'asc' ? (
+            <ArrowUp
+              className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400 print:hidden"
+              aria-hidden="true"
+            />
+          ) : (
+            <ArrowDown
+              className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400 print:hidden"
+              aria-hidden="true"
+            />
+          )
+        ) : (
+          <ArrowUpDown
+            className="h-3 w-3 shrink-0 opacity-45 group-hover:opacity-100 print:hidden"
+            aria-hidden="true"
+          />
+        )}
+      </button>
+    </th>
+  );
+}
+
 export function InvestigateView({
   state,
   apiSettings,
@@ -336,7 +432,14 @@ export function InvestigateView({
   );
   const [graphFocusedIndicator, setGraphFocusedIndicator] = useState<string | null>(null);
   const [notesSaveStatus, setNotesSaveStatus] = useState<'idle' | 'saved'>('idle');
+  const [notesAutoSave, setNotesAutoSave] = useState<NotesAutoSaveState>(() =>
+    typeof window !== 'undefined'
+      ? loadNotesAutoSaveState(window.localStorage)
+      : createEmptyNotesAutoSaveState(),
+  );
   const [bulkTableStyle, setBulkTableStyle] = useState<'unified' | 'detailed'>('unified');
+  const [tableSort, setTableSort] = useState<ResultsSortState | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [sessionExportedFile, setSessionExportedFile] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [isBackgroundPolling, setIsBackgroundPolling] = useState(false);
@@ -354,11 +457,14 @@ export function InvestigateView({
   const [watchlistLastCheckedUtc, setWatchlistLastCheckedUtc] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
   const sessionExportTimerRef = useRef<number | null>(null);
+  const exportDropdownRef = useRef<HTMLDivElement | null>(null);
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
   const iocInputRef = useRef<HTMLTextAreaElement | null>(null);
   const isBackgroundPollingRef = useRef(false);
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
+  const notesAutoSaveRef = useRef(notesAutoSave);
+  notesAutoSaveRef.current = notesAutoSave;
   const runEnrichmentRef = useRef<
     (override?: {
       rawInput: string;
@@ -391,6 +497,29 @@ export function InvestigateView({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    function handleOutside(e: MouseEvent) {
+      if (
+        exportDropdownRef.current &&
+        !exportDropdownRef.current.contains(e.target as Node)
+      ) {
+        setExportMenuOpen(false);
+      }
+    }
+    function handleEsc(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        setExportMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [exportMenuOpen]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -663,6 +792,16 @@ export function InvestigateView({
     });
   }, [state.results, verdictFilter, resultsTagFilter, indicatorTags, riskThreshold, confidenceByIndicator]);
 
+  const sortedResults = useMemo(
+    () => sortLookupResults(filteredResults, tableSort, confidenceByIndicator),
+    [filteredResults, tableSort, confidenceByIndicator],
+  );
+
+  const lastSeenByIndicator = useMemo(
+    () => buildLastSeenByIndicatorMap(state.results),
+    [state.results],
+  );
+
   const riskHiddenIndicatorCount = useMemo(() => {
     if (riskThreshold <= 0 || state.results.length === 0) return 0;
     const seen = new Set<string>();
@@ -747,6 +886,15 @@ export function InvestigateView({
       return true;
     });
   }, [unifiedBatchTable.rows, verdictFilter, resultsTagFilter, indicatorTags, riskThreshold]);
+
+  const sortedUnifiedBatchRows = useMemo(
+    () => sortUnifiedBatchRows(filteredUnifiedBatchRows, tableSort, lastSeenByIndicator),
+    [filteredUnifiedBatchRows, tableSort, lastSeenByIndicator],
+  );
+
+  function handleToggleTableSort(key: ResultsSortKey) {
+    setTableSort((prev) => toggleResultsSortState(prev, key));
+  }
 
   function handleAddTag(indicator: string, rawTag: string) {
     setIndicatorTags((prev) => {
@@ -899,34 +1047,89 @@ export function InvestigateView({
 
   const normalizedDraftNotes = normalizeInvestigationNotes(state.researcherNotes);
   const normalizedSavedNotes = normalizeInvestigationNotes(activeHistoryEntry?.notes);
-  const hasUnsavedNotes =
-    activeHistoryEntry !== null
-      ? normalizedDraftNotes !== normalizedSavedNotes
-      : normalizedDraftNotes.length > 0;
+  const normalizedAutoSavedDraft = normalizeInvestigationNotes(
+    activeHistoryId
+      ? notesAutoSave.entryDrafts[activeHistoryId]?.notes ?? notesAutoSave.draftNotes
+      : notesAutoSave.draftNotes,
+  );
+  const hasPendingAutoSave =
+    normalizedDraftNotes !== normalizedAutoSavedDraft ||
+    (activeHistoryEntry !== null && normalizedDraftNotes !== normalizedSavedNotes);
+  const hasUnsavedNotes = hasPendingAutoSave;
+
+  const lastAutoSavedTimeLabel = useMemo(() => {
+    const entryIso = activeHistoryId ? notesAutoSave.entryDrafts[activeHistoryId]?.updatedAt : null;
+    return formatAutoSaveUtcTimestamp(entryIso || notesAutoSave.draftUpdatedAt || activeHistoryEntry?.notesUpdatedAt);
+  }, [activeHistoryId, notesAutoSave, activeHistoryEntry?.notesUpdatedAt]);
 
   function persistNotesToHistory(targetEntryId: string | null, rawNotes: string) {
-    if (!targetEntryId) return;
-    setRecentHistory((prev) => updateRecentInvestigationNotes(prev, targetEntryId, rawNotes));
+    const now = new Date();
+    const nextAutoSave = upsertNotesAutoSaveDraft(notesAutoSaveRef.current, {
+      entryId: targetEntryId,
+      notes: rawNotes,
+      now,
+    });
+    notesAutoSaveRef.current = nextAutoSave;
+    setNotesAutoSave(nextAutoSave);
+    if (typeof window !== 'undefined') {
+      saveNotesAutoSaveState(window.localStorage, nextAutoSave);
+    }
+    if (targetEntryId) {
+      setRecentHistory((prev) => updateRecentInvestigationNotes(prev, targetEntryId, rawNotes, now));
+    }
     setNotesSaveStatus('saved');
   }
 
+  const flushNotesAutoSaveRef = useRef<() => void>(() => {});
+  flushNotesAutoSaveRef.current = () => {
+    const cur = latestStateRef.current;
+    persistNotesToHistory(cur.activeHistoryId, cur.researcherNotes);
+  };
+
+  // Fast debounced auto-save after analyst pauses typing
   useEffect(() => {
-    if (!activeHistoryId || !activeHistoryEntry) return;
-    if (normalizedDraftNotes === normalizedSavedNotes) return;
+    if (!hasPendingAutoSave) return;
     const timer = window.setTimeout(() => {
-      setRecentHistory((prev) =>
-        updateRecentInvestigationNotes(prev, activeHistoryId, state.researcherNotes),
-      );
-      setNotesSaveStatus('saved');
-    }, 450);
+      flushNotesAutoSaveRef.current();
+    }, NOTES_AUTOSAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [
-    activeHistoryId,
-    activeHistoryEntry,
-    state.researcherNotes,
-    normalizedDraftNotes,
-    normalizedSavedNotes,
-  ]);
+  }, [hasPendingAutoSave, state.researcherNotes, activeHistoryId]);
+
+  // Periodic background auto-save interval (persists findings every 3s even during continuous editing)
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const cur = latestStateRef.current;
+      const draftNorm = normalizeInvestigationNotes(cur.researcherNotes);
+      const savedNorm = normalizeInvestigationNotes(
+        cur.activeHistoryId
+          ? notesAutoSaveRef.current.entryDrafts[cur.activeHistoryId]?.notes ??
+              notesAutoSaveRef.current.draftNotes
+          : notesAutoSaveRef.current.draftNotes,
+      );
+      if (draftNorm !== savedNorm) {
+        flushNotesAutoSaveRef.current();
+      }
+    }, NOTES_AUTOSAVE_INTERVAL_MS);
+
+    const handlePageHide = () => {
+      const cur = latestStateRef.current;
+      if (normalizeInvestigationNotes(cur.researcherNotes).length > 0) {
+        const nextAuto = upsertNotesAutoSaveDraft(notesAutoSaveRef.current, {
+          entryId: cur.activeHistoryId,
+          notes: cur.researcherNotes,
+        });
+        saveNotesAutoSaveState(window.localStorage, nextAuto);
+      }
+    };
+
+    window.addEventListener('beforeunload', handlePageHide);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('beforeunload', handlePageHide);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, []);
 
   async function runEnrichment(override?: {
     rawInput: string;
@@ -1258,7 +1461,8 @@ export function InvestigateView({
     setFileImportSummary(null);
     setVerdictFilter('All');
     setGraphFocusedIndicator(null);
-    setNotesSaveStatus(entry.notes ? 'saved' : 'idle');
+    const restored = resolveRestoredNotesForEntry(notesAutoSaveRef.current, entry.id, entry.notes);
+    setNotesSaveStatus(restored.notes ? 'saved' : 'idle');
     onChangeState((prev) => ({
       ...prev,
       rawInput: entry.rawInput,
@@ -1274,7 +1478,7 @@ export function InvestigateView({
       lastReportFile: entry.reportFile,
       lastRunMode: entry.mode,
       activeHistoryId: entry.id,
-      researcherNotes: entry.notes ?? '',
+      researcherNotes: restored.notes,
     }));
   }
 
@@ -1316,6 +1520,12 @@ export function InvestigateView({
 
   function handleRemoveRecent(id: string) {
     setRecentHistory((prev) => removeRecentInvestigation(prev, id));
+    const pruned = removeEntryFromAutoSaveDrafts(notesAutoSaveRef.current, id);
+    notesAutoSaveRef.current = pruned;
+    setNotesAutoSave(pruned);
+    if (typeof window !== 'undefined') {
+      saveNotesAutoSaveState(window.localStorage, pruned);
+    }
     if (activeHistoryId === id) {
       onChangeState((prev) => ({ ...prev, activeHistoryId: null, researcherNotes: '' }));
       setNotesSaveStatus('idle');
@@ -1325,15 +1535,20 @@ export function InvestigateView({
   function handleClearRecent() {
     setRecentHistory([]);
     onChangeState((prev) => ({ ...prev, activeHistoryId: null }));
+    const emptied = createEmptyNotesAutoSaveState();
+    notesAutoSaveRef.current = emptied;
+    setNotesAutoSave(emptied);
     setNotesSaveStatus('idle');
     if (typeof window !== 'undefined') {
       clearRecentInvestigations(window.localStorage);
+      saveNotesAutoSaveState(window.localStorage, emptied);
     }
   }
 
   function handleExportResultsCsv() {
-    if (filteredResults.length === 0) return;
-    const csvContent = serializeResultsToCsv(filteredResults, new Date().toISOString());
+    if (sortedResults.length === 0) return;
+    setExportMenuOpen(false);
+    const csvContent = serializeResultsToCsv(sortedResults, new Date().toISOString());
     const filename = buildInvestigationCsvFilename(verdictFilter);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1347,16 +1562,43 @@ export function InvestigateView({
   }
 
   function handleExportResultsJson() {
-    if (filteredResults.length === 0) return;
+    if (sortedResults.length === 0) return;
+    setExportMenuOpen(false);
     const payload = buildStructuredResultsJsonPayload({
       allResults: state.results,
-      visibleResults: filteredResults,
+      visibleResults: sortedResults,
       verdictFilter,
       mode: state.lastRunMode,
     });
     const jsonText = serializeStructuredResultsJson(payload);
     const filename = buildResultsJsonFilename(verdictFilter);
     const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function handleExportResultsTxt() {
+    if (sortedResults.length === 0) return;
+    setExportMenuOpen(false);
+    const txtContent = buildFormattedResultsTxtReport({
+      allResults: state.results,
+      visibleResults: sortedResults,
+      verdictFilter,
+      tagFilter: resultsTagFilter,
+      riskThreshold,
+      sortState: tableSort,
+      indicatorTags,
+      researcherNotes: state.researcherNotes,
+      mode: state.lastRunMode,
+    });
+    const filename = buildResultsTxtFilename(verdictFilter);
+    const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -1406,6 +1648,21 @@ export function InvestigateView({
       window.clearTimeout(sessionExportTimerRef.current);
     }
     sessionExportTimerRef.current = window.setTimeout(() => setSessionExportedFile(null), 3500);
+  }
+
+  function handlePrintInvestigation() {
+    if (typeof window === 'undefined') return;
+    flushNotesAutoSaveRef.current();
+    const prevTitle = document.title;
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    document.title = `SoTI-Investigation-${stamp}`;
+    const restoreTitle = () => {
+      document.title = prevTitle;
+      window.removeEventListener('afterprint', restoreTitle);
+    };
+    window.addEventListener('afterprint', restoreTitle);
+    window.print();
+    window.setTimeout(restoreTitle, 1000);
   }
 
   function handleSwitchAnalysisMode(nextMode: InvestigationAnalysisMode) {
@@ -1532,9 +1789,9 @@ export function InvestigateView({
         </div>
       )}
 
-      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px] print:block">
         <div className="min-w-0 space-y-6">
-          <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6">
+          <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6 print:hidden">
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50 text-balance">
@@ -2179,9 +2436,9 @@ export function InvestigateView({
 
           <div
             data-testid="risk-threshold-settings"
-            className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 dark:border-slate-800/80 pt-3 text-xs"
+            className="flex flex-col gap-2.5 border-t border-slate-100 dark:border-slate-800/80 pt-3 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:justify-between"
           >
-            <div className="flex flex-wrap items-center gap-3 min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto sm:min-w-0 sm:flex-1">
               <label
                 htmlFor="investigate-risk-threshold-slider"
                 className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0"
@@ -2239,7 +2496,7 @@ export function InvestigateView({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 sm:shrink-0">
               {riskThreshold > 0 ? (
                 <>
                   <span data-testid="risk-threshold-hidden-summary" className="font-mono tabular-nums">
@@ -2345,7 +2602,40 @@ export function InvestigateView({
       </section>
 
       {state.results.length > 0 ? (
-        <section className="space-y-6">
+        <div className="space-y-6">
+          <div
+            data-testid="investigate-print-header"
+            className="hidden print:block rounded-lg border border-slate-300 bg-white px-5 py-4 text-slate-900"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200 pb-2">
+              <h1 className="text-lg font-bold tracking-tight text-slate-950">
+                SoTI — Threat Intelligence Investigation Report
+              </h1>
+              <span className="font-mono text-xs text-slate-600 tabular-nums">
+                Generated {new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC
+              </span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-slate-700">
+              <span>Mode: {state.lastRunMode === 'live' ? 'Live API' : 'Sample Data'}</span>
+              <span>·</span>
+              <span>Indicators: {resultIndicatorsList.length}</span>
+              <span>·</span>
+              <span>Verdict filter: {verdictFilter}</span>
+              {riskThreshold > 0 && (
+                <>
+                  <span>·</span>
+                  <span>Min Confidence: {riskThreshold}/100</span>
+                </>
+              )}
+              {state.lastReportFile && (
+                <>
+                  <span>·</span>
+                  <span>CSV: reports/{state.lastReportFile}</span>
+                </>
+              )}
+            </div>
+          </div>
+
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
             <div className="flex flex-col gap-3 border-b border-slate-200 dark:border-slate-800 px-5 py-4 md:px-6">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -2359,7 +2649,7 @@ export function InvestigateView({
                     {sessionExportedFile && (
                       <span
                         data-testid="session-export-confirmation"
-                        className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-400"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-400 print:hidden"
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         <span>Exported {sessionExportedFile}</span>
@@ -2375,33 +2665,93 @@ export function InvestigateView({
 
                 <div
                   data-testid="download-results-controls"
-                  className="flex flex-wrap items-center gap-2 min-w-0 max-w-full sm:shrink-0"
+                  className="flex flex-wrap items-center gap-2 min-w-0 max-w-full sm:shrink-0 print:hidden"
                 >
-                  <span className="hidden xl:inline text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                    Download Results:
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="export-results-csv-button"
-                    disabled={filteredResults.length === 0}
-                    onClick={handleExportResultsCsv}
-                    aria-label="Download current analysis results as CSV"
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
-                  >
-                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    Export to CSV
-                  </button>
+                  <div ref={exportDropdownRef} className="relative">
+                    <button
+                      type="button"
+                      data-testid="export-data-dropdown-button"
+                      disabled={sortedResults.length === 0}
+                      aria-haspopup="menu"
+                      aria-expanded={exportMenuOpen}
+                      aria-label="Export current table view as CSV, JSON, or TXT report"
+                      onClick={() => setExportMenuOpen((open) => !open)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                    >
+                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Export Data</span>
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 transition-transform duration-150 ${exportMenuOpen ? 'rotate-180' : ''}`}
+                        aria-hidden="true"
+                      />
+                    </button>
+
+                    {exportMenuOpen && (
+                      <div
+                        role="menu"
+                        data-testid="export-data-dropdown-menu"
+                        aria-label="Choose data export format"
+                        className="absolute right-0 z-30 mt-1.5 w-64 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 py-1.5 shadow-lg"
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-testid="export-results-csv-button"
+                          onClick={handleExportResultsCsv}
+                          className="flex w-full items-center justify-between gap-3 px-3.5 py-2 text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                        >
+                          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                            <Download className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                            <span>Export CSV (.csv)</span>
+                          </span>
+                          <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500">
+                            Spreadsheet
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-testid="export-results-json-button"
+                          onClick={handleExportResultsJson}
+                          className="flex w-full items-center justify-between gap-3 px-3.5 py-2 text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                        >
+                          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                            <FileJson className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                            <span>Export JSON (.json)</span>
+                          </span>
+                          <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500">
+                            Structured
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-testid="export-results-txt-button"
+                          onClick={handleExportResultsTxt}
+                          className="flex w-full items-center justify-between gap-3 px-3.5 py-2 text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                        >
+                          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                            <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                            <span>Export TXT Report (.txt)</span>
+                          </span>
+                          <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500">
+                            Readable
+                          </span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
 
                   <button
                     type="button"
-                    data-testid="export-results-json-button"
-                    disabled={filteredResults.length === 0}
-                    onClick={handleExportResultsJson}
-                    aria-label="Download current analysis results as structured JSON"
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                    data-testid="print-investigation-button"
+                    onClick={handlePrintInvestigation}
+                    aria-label="Print or export current investigation as PDF"
+                    title="Open browser print dialog to print or save tables, notes, timeline, and charts as PDF"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
                   >
-                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    Download JSON
+                    <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+                    Print / PDF
                   </button>
 
                   <button
@@ -2444,7 +2794,7 @@ export function InvestigateView({
                 ))}
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2.5 print:hidden">
                 <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
                   {isBulkMode && (
                     <div
@@ -2668,37 +3018,79 @@ export function InvestigateView({
             </div>
 
             {isBulkMode && bulkTableStyle === 'unified' ? (
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto print:overflow-visible">
                 <table
                   data-testid="bulk-batch-results-table"
-                  className="w-full text-left text-sm"
+                  className="w-full text-left text-sm print:text-xs"
                 >
                   <thead>
                     <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                      <th className="pl-4 pr-2.5 py-3">Indicator &amp; Tags</th>
-                      <th className="px-2.5 py-3">Type</th>
-                      <th className="px-2.5 py-3">Overall Verdict</th>
-                      <th className="px-2.5 py-3 text-right whitespace-nowrap">Confidence</th>
-                      <th className="px-2.5 py-3 whitespace-nowrap" title="Historical threat confidence trend across runs">
+                      <SortableColumnHeader
+                        label="Indicator"
+                        sortKey="indicator"
+                        sortState={tableSort}
+                        onSort={handleToggleTableSort}
+                        className="pl-3.5 pr-2 py-2.5 min-w-[140px]"
+                      />
+                      <SortableColumnHeader
+                        label="Type"
+                        sortKey="type"
+                        sortState={tableSort}
+                        onSort={handleToggleTableSort}
+                        className="px-2 py-2.5"
+                      />
+                      <SortableColumnHeader
+                        label="Verdict"
+                        sortKey="verdict"
+                        sortState={tableSort}
+                        onSort={handleToggleTableSort}
+                        className="px-2 py-2.5"
+                      />
+                      <SortableColumnHeader
+                        label="Risk Score"
+                        sortKey="riskScore"
+                        sortState={tableSort}
+                        onSort={handleToggleTableSort}
+                        align="right"
+                        title="Sort by weighted threat risk confidence score (0-100)"
+                        className="px-2 py-2.5 text-right whitespace-nowrap"
+                      />
+                      <th className="px-2 py-2.5 whitespace-nowrap" title="Historical threat confidence trend across runs">
                         Trend
                       </th>
+                      <SortableColumnHeader
+                        label="Last Seen"
+                        sortKey="lastSeen"
+                        sortState={tableSort}
+                        onSort={handleToggleTableSort}
+                        title="Sort by latest observed threat intelligence timestamp (UTC)"
+                        className="px-2 py-2.5 whitespace-nowrap"
+                      />
                       {unifiedBatchTable.providerColumns.map((col) => (
-                        <th key={col.sourceId} className="px-2.5 py-3 whitespace-nowrap">
-                          {col.source}
+                        <th key={col.sourceId} className="px-2 py-2.5 whitespace-nowrap">
+                          {col.source === 'AlienVault OTX' ? 'OTX' : col.source}
                         </th>
                       ))}
-                      <th className="px-2.5 py-3 text-right whitespace-nowrap">Hits</th>
-                      <th className="pl-2.5 pr-4 py-3 text-right">Actions</th>
+                      <SortableColumnHeader
+                        label="Hits"
+                        sortKey="hits"
+                        sortState={tableSort}
+                        onSort={handleToggleTableSort}
+                        align="right"
+                        className="px-2 py-2.5 text-right whitespace-nowrap"
+                      />
+                      <th className="pl-2 pr-3.5 py-2.5 text-right print:hidden">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {filteredUnifiedBatchRows.map((row) => {
+                    {sortedUnifiedBatchRows.map((row) => {
                       const batchRowKey = `batch:${row.indicator}`;
                       const batchValKey = `batch-val:${row.indicator}`;
                       const isBatchCopied = copiedKey === batchRowKey;
                       const isBatchValueCopied = copiedKey === batchValKey;
                       const confTone = getConfidenceToneClass(row.riskLevel);
                       const trend = confidenceTrends.get(row.indicator.trim().toLowerCase());
+                      const rowLastSeen = lastSeenByIndicator.get(row.indicator.trim().toLowerCase());
                       const isRowTagOpen = tableTaggingIndicator === row.indicator;
                       return (
                         <tr
@@ -2706,7 +3098,7 @@ export function InvestigateView({
                           data-testid="bulk-batch-row"
                           className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
                         >
-                          <td className="pl-4 pr-2.5 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
+                          <td className="pl-3.5 pr-2 py-2.5 min-w-[140px] max-w-[185px] font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
                             <div className="flex items-start gap-1.5">
                               <span className="break-all">{row.indicator}</span>
                               <button
@@ -2716,7 +3108,7 @@ export function InvestigateView({
                                 onClick={() => triggerClipboardCopy(row.indicator, batchValKey)}
                                 aria-label={`Copy indicator value ${row.indicator} to clipboard`}
                                 title={isBatchValueCopied ? `Copied ${row.indicator}` : `Copy ${row.indicator} to clipboard`}
-                                className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer ${
+                                className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer print:hidden ${
                                   isBatchValueCopied
                                     ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
                                     : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
@@ -2742,7 +3134,7 @@ export function InvestigateView({
                                     data-testid="row-remove-tag-btn"
                                     onClick={() => handleRemoveTag(row.indicator, tag)}
                                     aria-label={`Remove tag ${tag} from ${row.indicator}`}
-                                    className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                                    className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer print:hidden"
                                   >
                                     <X className="h-2.5 w-2.5" aria-hidden="true" />
                                   </button>
@@ -2756,7 +3148,7 @@ export function InvestigateView({
                                   setTableTaggingIndicator(isRowTagOpen ? null : row.indicator);
                                   setTableCustomTagInput('');
                                 }}
-                                className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer print:hidden ${
                                   isRowTagOpen
                                     ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950'
                                     : 'border-dashed border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
@@ -2780,7 +3172,7 @@ export function InvestigateView({
                                         row.confidenceScore,
                                       )
                                     }
-                                    className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                    className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer print:hidden ${
                                       isWatched
                                         ? 'border-red-300 dark:border-red-800 bg-red-50/70 dark:bg-red-950/40 text-red-700 dark:text-red-300'
                                         : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
@@ -2819,6 +3211,13 @@ export function InvestigateView({
                           <td className="px-2.5 py-3 whitespace-nowrap">
                             <ConfidenceSparkline indicator={row.indicator} trend={trend} />
                           </td>
+                          <td
+                            data-testid="batch-last-seen-cell"
+                            title={rowLastSeen?.fieldLabel ? `${rowLastSeen.fieldLabel}: ${rowLastSeen.displayUtc}` : 'No observation timestamp available'}
+                            className="px-2.5 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap"
+                          >
+                            {rowLastSeen?.displayUtc ?? '—'}
+                          </td>
                           {unifiedBatchTable.providerColumns.map((col) => {
                             const cell = row.providerCells[col.sourceId];
                             if (!cell) {
@@ -2851,7 +3250,7 @@ export function InvestigateView({
                           <td className="px-2.5 py-3 text-right font-mono text-xs text-slate-700 dark:text-slate-300 tabular-nums whitespace-nowrap">
                             {row.maliciousHits + row.suspiciousHits}/{row.respondedCount}
                           </td>
-                          <td className="pl-2.5 pr-4 py-3 text-right whitespace-nowrap">
+                          <td className="pl-2.5 pr-4 py-3 text-right whitespace-nowrap print:hidden">
                             <button
                               type="button"
                               data-testid="copy-ioc-button"
@@ -2887,10 +3286,10 @@ export function InvestigateView({
                         </tr>
                       );
                     })}
-                    {filteredUnifiedBatchRows.length === 0 && (
+                    {sortedUnifiedBatchRows.length === 0 && (
                       <tr>
                         <td
-                          colSpan={7 + unifiedBatchTable.providerColumns.length}
+                          colSpan={8 + unifiedBatchTable.providerColumns.length}
                           className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400"
                         >
                           No indicators match the active verdict or tag filters.
@@ -2901,39 +3300,87 @@ export function InvestigateView({
                 </table>
               </div>
             ) : (
-            <div className="overflow-x-auto">
-              <table data-testid="summary-matrix-table" className="w-full text-left text-sm">
+            <div className="overflow-x-auto print:overflow-visible">
+              <table data-testid="summary-matrix-table" className="w-full text-left text-xs print:text-[11px]">
                 <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                    <th className="pl-3.5 pr-2 py-3">Indicator &amp; Tags</th>
-                    <th className="px-2 py-3">Type</th>
-                    <th className="px-2 py-3">Source</th>
-                    <th className="px-2 py-3">Verdict</th>
-                    <th className="px-2 py-3 text-right whitespace-nowrap" title="Weighted Confidence Score">
-                      Confidence
-                    </th>
-                    <th className="px-2 py-3 whitespace-nowrap" title="Historical threat confidence trend across runs">
+                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                    <SortableColumnHeader
+                      label="Indicator"
+                      sortKey="indicator"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      className="pl-2.5 pr-1 py-2.5 min-w-[118px]"
+                    />
+                    <SortableColumnHeader
+                      label="Type"
+                      sortKey="type"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      className="px-1 py-2.5"
+                    />
+                    <SortableColumnHeader
+                      label="Source"
+                      sortKey="source"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      className="px-1 py-2.5"
+                    />
+                    <SortableColumnHeader
+                      label="Verdict"
+                      sortKey="verdict"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      className="px-1 py-2.5"
+                    />
+                    <SortableColumnHeader
+                      label="Risk Score"
+                      sortKey="riskScore"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      align="right"
+                      title="Weighted Confidence Risk Score (0-100)"
+                      className="px-1 py-2.5 text-right whitespace-nowrap"
+                    />
+                    <th className="px-1 py-2.5 whitespace-nowrap" title="Historical threat confidence trend across runs">
                       Trend
                     </th>
-                    <th className="px-2 py-3 text-right">Score</th>
-                    <th className="px-2 py-3">Summary</th>
-                    <th className="pl-2 pr-3.5 py-3 text-right">Actions</th>
+                    <SortableColumnHeader
+                      label="Last Seen"
+                      sortKey="lastSeen"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      title="Latest observation, abuse report, or scan timestamp (UTC)"
+                      className="px-1 py-2.5 whitespace-nowrap"
+                    />
+                    <SortableColumnHeader
+                      label="Score"
+                      sortKey="score"
+                      sortState={tableSort}
+                      onSort={handleToggleTableSort}
+                      align="right"
+                      className="px-1 py-2.5 text-right"
+                    />
+                    <th className="px-1 py-2.5">Summary</th>
+                    <th className="pl-1 pr-2.5 py-2.5 text-right print:hidden">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {filteredResults.map((r, i) => {
+                  {sortedResults.map((r, i) => {
                     const rowKey = `row:${r.indicator}:${r.sourceId}:${i}`;
                     const valCopyKey = `row-val:${r.indicator}:${r.sourceId}:${i}`;
                     const isCopied = copiedKey === rowKey;
                     const isValueCopied = copiedKey === valCopyKey;
                     const confidence = confidenceByIndicator.get(r.indicator.trim().toLowerCase());
                     const trend = confidenceTrends.get(r.indicator.trim().toLowerCase());
+                    const lastSeen = extractResultLastSeen(r);
+                    const lastSeenParts =
+                      lastSeen.displayUtc === '—' ? null : lastSeen.displayUtc.replace(' UTC', 'Z').split(' ');
                     const rowTags = getTagsForIndicator(indicatorTags, r.indicator);
                     const confTone = getConfidenceToneClass(confidence?.riskLevel ?? 'Unknown');
                     const isRowTagOpen = tableTaggingIndicator === r.indicator;
                     return (
                       <tr key={rowKey} data-testid="summary-matrix-row" className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
-                        <td className="pl-3.5 pr-2 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
+                        <td className="pl-2.5 pr-1 py-2.5 min-w-[118px] max-w-[150px] font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
                           <div className="flex items-start gap-1.5">
                             <span className="break-all">{r.indicator}</span>
                             <button
@@ -2943,7 +3390,7 @@ export function InvestigateView({
                               onClick={() => triggerClipboardCopy(r.indicator, valCopyKey)}
                               aria-label={`Copy indicator value ${r.indicator} to clipboard`}
                               title={isValueCopied ? `Copied ${r.indicator}` : `Copy ${r.indicator} to clipboard`}
-                              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer ${
+                              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer print:hidden ${
                                 isValueCopied
                                   ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
                                   : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
@@ -2969,7 +3416,7 @@ export function InvestigateView({
                                   data-testid="row-remove-tag-btn"
                                   onClick={() => handleRemoveTag(r.indicator, tag)}
                                   aria-label={`Remove tag ${tag} from ${r.indicator}`}
-                                  className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                                  className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer print:hidden"
                                 >
                                   <X className="h-2.5 w-2.5" aria-hidden="true" />
                                 </button>
@@ -2983,7 +3430,7 @@ export function InvestigateView({
                                 setTableTaggingIndicator(isRowTagOpen ? null : r.indicator);
                                 setTableCustomTagInput('');
                               }}
-                              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer print:hidden ${
                                 isRowTagOpen
                                   ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950'
                                   : 'border-dashed border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
@@ -3010,7 +3457,7 @@ export function InvestigateView({
                                       confidence?.confidenceScore ?? null,
                                     )
                                   }
-                                  className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                  className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer print:hidden ${
                                     isWatched
                                       ? 'border-red-300 dark:border-red-800 bg-red-50/70 dark:bg-red-950/40 text-red-700 dark:text-red-300'
                                       : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
@@ -3023,23 +3470,23 @@ export function InvestigateView({
                             })()}
                           </div>
                         </td>
-                        <td className="px-2 py-3 font-mono text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.type}</td>
-                        <td className="px-2 py-3 text-xs font-medium text-slate-800 dark:text-slate-200">
-                          {r.source}
+                        <td className="px-1 py-2.5 font-mono text-[11px] uppercase text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.type}</td>
+                        <td className="px-1 py-2.5 text-xs font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                          {r.source === 'AlienVault OTX' ? 'OTX' : r.source}
                         </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
+                        <td className="px-1 py-2.5 whitespace-nowrap">
                           <VerdictIndicator verdict={r.verdict} status={r.status} />
                         </td>
                         <td
-                          className="px-2 py-3 text-right whitespace-nowrap"
+                          className="px-1 py-2.5 text-right whitespace-nowrap"
                           title={confidence?.explanation || 'No active scores'}
                         >
                           {confidence && confidence.confidenceScore !== null ? (
-                            <div className="inline-flex items-baseline gap-1 font-mono text-xs tabular-nums">
-                              <span className={`font-semibold ${confTone}`}>
+                            <div className="inline-flex flex-col items-end leading-tight">
+                              <span className={`font-mono text-xs font-semibold tabular-nums ${confTone}`}>
                                 {confidence.confidenceScore}/100
                               </span>
-                              <span className="font-sans text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                              <span className="font-sans text-[10px] font-medium text-slate-500 dark:text-slate-400">
                                 {confidence.riskLevel}
                               </span>
                             </div>
@@ -3047,21 +3494,37 @@ export function InvestigateView({
                             <span className="font-mono text-xs text-slate-400 dark:text-slate-500">—</span>
                           )}
                         </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
+                        <td className="px-1 py-2.5 whitespace-nowrap">
                           <ConfidenceSparkline indicator={r.indicator} trend={trend} />
                         </td>
-                        <td className="px-2 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
+                        <td
+                          data-testid="summary-last-seen-cell"
+                          title={lastSeen.fieldLabel ? `${lastSeen.fieldLabel}: ${lastSeen.displayUtc}` : 'No observation timestamp available'}
+                          className="px-1 py-2.5 font-mono text-[10px] leading-tight text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap"
+                        >
+                          {lastSeenParts ? (
+                            <div className="flex flex-col">
+                              <span>{lastSeenParts[0]}</span>
+                              {lastSeenParts[1] && (
+                                <span className="text-slate-400 dark:text-slate-500">{lastSeenParts[1]}</span>
+                              )}
+                            </div>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="px-1 py-2.5 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
                           {r.score}
                         </td>
-                        <td className="px-2 py-3 text-xs text-slate-600 dark:text-slate-300 max-w-[200px] leading-snug">{r.summary}</td>
-                        <td className="pl-2 pr-3.5 py-3 text-right whitespace-nowrap">
+                        <td className="px-1 py-2.5 text-[11px] text-slate-600 dark:text-slate-300 max-w-[116px] leading-snug">{r.summary}</td>
+                        <td className="pl-1 pr-2.5 py-2.5 text-right whitespace-nowrap print:hidden">
                           <button
                             type="button"
                             data-testid="copy-ioc-button"
                             onClick={() => triggerClipboardCopy(formatIocClipboardText(r), rowKey)}
                             aria-label={`Copy ${r.indicator} (${r.source}) to clipboard`}
                             title="Copy to clipboard"
-                            className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                               isCopied
                                 ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
                                 : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700'
@@ -3069,12 +3532,12 @@ export function InvestigateView({
                           >
                             {isCopied ? (
                               <>
-                                <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
                                 Copied
                               </>
                             ) : (
                               <>
-                                <Copy className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                <Copy className="h-3 w-3 shrink-0" aria-hidden="true" />
                                 Copy
                               </>
                             )}
@@ -3083,9 +3546,9 @@ export function InvestigateView({
                       </tr>
                     );
                   })}
-                  {filteredResults.length === 0 && (
+                  {sortedResults.length === 0 && (
                     <tr>
-                      <td colSpan={9} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                      <td colSpan={10} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
                         No results match the active verdict or tag filters.
                       </td>
                     </tr>
@@ -3113,50 +3576,52 @@ export function InvestigateView({
                   </label>
                 </div>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  Record triage findings, correlated TTPs, or escalation decisions. Saved locally with this investigation entry.
+                  Record triage findings, correlated TTPs, or containment decisions. Auto-saved periodically to local storage without manual save.
                 </p>
               </div>
 
               <div className="flex items-center gap-3 text-xs shrink-0">
-                {activeHistoryEntry ? (
-                  hasUnsavedNotes ? (
-                    <span
-                      data-testid="researcher-notes-status"
-                      className="font-medium text-amber-700 dark:text-amber-400"
-                    >
-                      Unsaved changes
+                {hasPendingAutoSave ? (
+                  <span
+                    data-testid="researcher-notes-status"
+                    role="status"
+                    aria-live="polite"
+                    className="font-medium text-amber-700 dark:text-amber-400"
+                  >
+                    Auto-saving to local storage...
+                  </span>
+                ) : normalizedDraftNotes.length > 0 ? (
+                  <span
+                    data-testid="researcher-notes-status"
+                    role="status"
+                    aria-live="polite"
+                    className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span>
+                      Auto-saved to local storage
+                      {lastAutoSavedTimeLabel ? ` · ${lastAutoSavedTimeLabel}` : ''}
                     </span>
-                  ) : normalizedSavedNotes.length > 0 ? (
-                    <span
-                      data-testid="researcher-notes-status"
-                      className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400"
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                      <span>
-                        Saved to local history
-                        {activeHistoryEntry.notesUpdatedAt
-                          ? ` · ${activeHistoryEntry.notesUpdatedAt.slice(11, 16)} UTC`
-                          : ''}
-                      </span>
-                    </span>
-                  ) : notesSaveStatus === 'saved' ? (
-                    <span
-                      data-testid="researcher-notes-status"
-                      className="font-medium text-slate-500 dark:text-slate-400"
-                    >
-                      Notes cleared
-                    </span>
-                  ) : null
+                  </span>
+                ) : notesSaveStatus === 'saved' ? (
+                  <span
+                    data-testid="researcher-notes-status"
+                    role="status"
+                    aria-live="polite"
+                    className="font-medium text-slate-500 dark:text-slate-400"
+                  >
+                    Notes cleared
+                  </span>
                 ) : (
                   <span
                     data-testid="researcher-notes-status"
                     className="text-slate-500 dark:text-slate-400"
                   >
-                    Not linked to a history entry
+                    Auto-save ready (every 3s)
                   </span>
                 )}
 
-                <span className="font-mono text-[11px] text-slate-400 dark:text-slate-500 tabular-nums">
+                <span className="font-mono text-[11px] text-slate-400 dark:text-slate-500 tabular-nums print:hidden">
                   {state.researcherNotes.length}/{MAX_INVESTIGATION_NOTES_LENGTH}
                 </span>
               </div>
@@ -3174,19 +3639,26 @@ export function InvestigateView({
                 onChangeState((prev) => ({ ...prev, researcherNotes: nextVal }));
               }}
               onBlur={() => {
-                if (activeHistoryId && hasUnsavedNotes) {
+                if (hasPendingAutoSave) {
                   persistNotesToHistory(activeHistoryId, state.researcherNotes);
                 }
               }}
               placeholder="Document malware family attribution, passive DNS pivots, affected hosts, or containment actions..."
-              className="mt-3 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-950/60 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-950 focus:outline-none"
+              className="mt-3 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-950/60 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-950 focus:outline-none print:hidden"
             />
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div
+              data-testid="researcher-notes-print-body"
+              className="hidden print:block mt-3 whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50/40 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900"
+            >
+              {state.researcherNotes.trim() || 'No researcher notes recorded for this investigation.'}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 print:hidden">
               <span className="text-[11px] text-slate-500 dark:text-slate-400">
                 {activeHistoryEntry
-                  ? `Linked entry: ${activeHistoryEntry.indicators.slice(0, 2).join(', ')}${activeHistoryEntry.indicators.length > 2 ? ` +${activeHistoryEntry.indicators.length - 2}` : ''}`
-                  : 'Run an enrichment lookup to link notes to a local history entry.'}
+                  ? `Synced to local storage & history entry: ${activeHistoryEntry.indicators.slice(0, 2).join(', ')}${activeHistoryEntry.indicators.length > 2 ? ` +${activeHistoryEntry.indicators.length - 2}` : ''}`
+                  : 'Persists automatically to browser local storage every 3s.'}
               </span>
 
               <div className="flex items-center gap-2 shrink-0">
@@ -3196,11 +3668,7 @@ export function InvestigateView({
                     data-testid="clear-researcher-notes-btn"
                     onClick={() => {
                       onChangeState((prev) => ({ ...prev, researcherNotes: '' }));
-                      if (activeHistoryId) {
-                        persistNotesToHistory(activeHistoryId, '');
-                      } else {
-                        setNotesSaveStatus('idle');
-                      }
+                      persistNotesToHistory(activeHistoryId, '');
                     }}
                     className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
                   >
@@ -3211,12 +3679,12 @@ export function InvestigateView({
                 <button
                   type="button"
                   data-testid="save-researcher-notes-btn"
-                  disabled={!activeHistoryId || !hasUnsavedNotes}
+                  disabled={!hasPendingAutoSave}
                   onClick={() => persistNotesToHistory(activeHistoryId, state.researcherNotes)}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 px-3.5 py-1.5 text-xs font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
                 >
                   <Save className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <span>Save Notes</span>
+                  <span>{hasPendingAutoSave ? 'Save Now' : 'Synced'}</span>
                 </button>
               </div>
             </div>
@@ -3266,7 +3734,7 @@ export function InvestigateView({
                             type="button"
                             onClick={() => handleRemoveTag(group.indicator, tag)}
                             aria-label={`Remove tag ${tag} from ${group.indicator}`}
-                            className="ml-0.5 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                            className="ml-0.5 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer print:hidden"
                           >
                             <X className="h-3 w-3" aria-hidden="true" />
                           </button>
@@ -3285,7 +3753,7 @@ export function InvestigateView({
                             setCustomTagInput('');
                           }
                         }}
-                        className="inline-flex items-center gap-1 rounded-md border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+                        className="inline-flex items-center gap-1 rounded-md border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer print:hidden"
                       >
                         <Tag className="h-3 w-3" aria-hidden="true" />
                         <span>Add Tag</span>
@@ -3307,7 +3775,7 @@ export function InvestigateView({
                                 confidence?.confidenceScore ?? null,
                               )
                             }
-                            className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer print:hidden ${
                               isWatched
                                 ? 'border-red-300 dark:border-red-800 bg-red-50/70 dark:bg-red-950/40 text-red-700 dark:text-red-300'
                                 : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
@@ -3358,7 +3826,7 @@ export function InvestigateView({
                         )
                       }
                       aria-label={`Copy full summary for ${group.indicator} to clipboard`}
-                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer print:hidden ${
                         isGroupCopied
                           ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
                           : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
@@ -3519,7 +3987,7 @@ export function InvestigateView({
               );
             })}
           </div>
-        </section>
+        </div>
       ) : (
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-6 py-12 text-center">
           <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Ready to enrich indicators</h2>
@@ -3530,7 +3998,7 @@ export function InvestigateView({
       )}
         </div>
 
-        <div className="lg:sticky lg:top-20 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+        <div className="lg:sticky lg:top-20 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden print:hidden">
           <div
             role="tablist"
             aria-label="Investigation sidebar views"

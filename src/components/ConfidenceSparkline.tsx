@@ -6,8 +6,8 @@ interface ConfidenceSparklineProps {
   trend?: IndicatorConfidenceTrend;
 }
 
-const SVG_WIDTH = 56;
-const SVG_HEIGHT = 22;
+const SVG_WIDTH = 48;
+const SVG_HEIGHT = 20;
 const PAD_X = 3;
 const PAD_Y = 3;
 
@@ -138,7 +138,7 @@ export function ConfidenceSparkline({ indicator, trend }: ConfidenceSparklinePro
         aria-expanded={open}
         title={tooltipSummary}
         onClick={() => setOpen((prev) => !prev)}
-        className="group inline-flex items-center gap-2 rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+        className="group inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
       >
         <svg
           width={SVG_WIDTH}

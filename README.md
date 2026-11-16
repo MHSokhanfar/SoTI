@@ -154,7 +154,7 @@ Then open **[http://localhost:3000](http://localhost:3000)**.
      - Toggle the **Live Mode** switch ON whenever you have active indicators to continuously monitor for score or verdict changes in the background.
      - Choose a polling cadence (`15s`, `30s`, `60s`, or `5m`), watch the real-time **`Next refresh in Xs (HH:MM:SS UTC)`** countdown and last-refresh timestamp in the status strip, or click **Refresh Now** for an immediate poll without creating duplicate history cards or redundant CSV reports.
    - **Providers, Risk Threshold & Inspection**: Select active providers (**VirusTotal**, **AbuseIPDB**, **AlienVault OTX**, **ThreatFox**, **URLScan**, plus enabled custom sources), dial the **Risk Threshold** slider (`0–100` with `All`, `25+`, `50+`, `75+` presets) to hide low-impact IOCs from both the **Summary Matrix** and **Unified Batch** tables, inspect the **Confidence Score Legend**, per-row **Historical Confidence Trend Mini-Sparklines** (highlighting rising `Emerging` threat signals across past CSV reports, history, and Live Mode polls), D3 **Attack Infrastructure Network Graph**, and **Chronological IOC Activity Timeline** (`Creation Date`, `Domain Registered`, `First Seen`, `Last Seen`, `Last Reported`, `Last Analysis`).
-   - **Quick Copy, Tagging, Notes & Exports**: Click the inline **Copy to Clipboard** icon next to any indicator value in every row of the **Summary Matrix** or **Unified Batch** tables to copy the raw IOC (`1.2.3.4`, `evil.com`, hash) for external security tools (or use **Copy** for the formatted provider summary). Click **`+ Tag`** on any row or IOC card to assign presets (`Phishing`, `Malware`, `Critical`, `C2`, `Ransomware`, `False Positive`) or custom labels, filter results by tag and verdict, record **Researcher Notes**, export visible findings via **Export to CSV** / **Download JSON**, and save portable bundles via **Export Full Session**.
+   - **Interactive Column Sorting, Last Seen, Quick Copy, Tagging, Auto-Saved Notes & Export Dropdown**: Click any sortable column header (**`Indicator`**, **`Type`**, **`Source`**, **`Verdict`**, **`Risk Score`**, **`Last Seen`**, **`Score`**, or **`Hits`**) in either the **Summary Matrix** or **Unified Batch** table to toggle ascending/descending order (`aria-sort` + directional indicators) for rapid threat prioritization. Click the inline **Copy to Clipboard** icon next to any indicator value in every row to copy the raw IOC (`1.2.3.4`, `evil.com`, hash) for external security tools (or use **Copy** for the formatted provider summary). Click **`+ Tag`** on any row or IOC card to assign presets (`Phishing`, `Malware`, `Critical`, `C2`, `Ransomware`, `False Positive`) or custom labels, filter results by tag and verdict, and record **Researcher Notes**—which **auto-save periodically to `localStorage`** (with debounced writes, a 3-second periodic timer, and `beforeunload` flush, showing `"Auto-saved to local storage · HH:MM:SS UTC"`). Open the **`Export Data`** dropdown menu to export the currently sorted & filtered table view to **`Export CSV (.csv)`**, **`Export JSON (.json)`**, or **`Export TXT Report (.txt)`**, click **`Print / PDF`** for a clean print-formatted PDF layout via `@media print` rules in `index.css`, or export the complete workbench bundle via **Export Full Session**.
    - **Tabbed Sidebar (`Recent` & Persistent `Watchlist`)**:
      - **Recent**: Browse local investigation history with right-click **Pin / Rename / Delete**, tag filtering, and D3 heatmap geographic region filtering.
      - **Watchlist**: Monitor specific IOCs persistently across browser reloads—add indicators manually or toggle **`Watch`** / **`Watching`** on any results row or IOC card, run **Check Updates** on demand (or let Live Mode / enrichment polls re-evaluate monitored IOCs), view status/score transition deltas (`Verdict Clean -> Malicious · Score 0 -> 79`), and clear unread counters from the red **notification badge** on the Watchlist tab.
@@ -233,6 +233,10 @@ python main.py --remove-schedule <SCHEDULE_ID>
 
 ## 7. Recently Added Features
 
+- **Interactive Sortable Results Columns & `Last Seen` Telemetry (`InvestigateView` & `resultsTable`)**: Clickable ascending/descending column sorting (`Indicator`, `Risk Score`, `Last Seen`, `Type`, `Source`, `Verdict`, `Score`, and `Hits`) across both the **Summary Matrix** and **Unified Batch** tables with accessible `aria-sort` state, active sort arrow indicators, deterministic N/A-last ranking, and a dedicated **`Last Seen`** UTC observation timestamp column extracted from provider telemetry (`Last Seen`, `Last Reported`, `Last Analysis`, `Updated`).
+- **`Export Data` Multi-Format Dropdown (`CSV`, `JSON`, `TXT Report`)**: Replaced separate export triggers with a unified **`Export Data`** dropdown menu in **InvestigateView** allowing analysts to export the **currently sorted & filtered view** as **`Export CSV (.csv)`**, **`Export JSON (.json)`**, or a human-readable **`Export TXT Report (.txt)`** (`soti_report_*.txt`) complete with active filter metadata, sort order, verdict breakdown, confidence scores, `Last Seen` timestamps, tags, and **Researcher Notes**.
+- **Researcher Notes Periodic Auto-Save (`InvestigateView` & `notesAutoSave`)**: Analyst findings typed into the **Researcher Notes** panel are automatically persisted to `localStorage` (`soti_researcher_notes_autosave_v1` + recent run history sync) via fast debounced writes, a **3-second periodic interval**, and `pagehide` / `beforeunload` flushes—requiring zero manual Save clicks while keeping live `"Auto-saving..."` / `"Auto-saved to local storage · HH:MM:SS UTC"` feedback and cross-reload restoration.
+- **Dedicated Print-Friendly Investigation View (`Print / PDF` & `index.css` `@media print`)**: Added a dedicated **`Print / PDF`** button in the **Summary Matrix** toolbar that triggers the browser print dialog (`window.print()`) with curated A4 landscape `@media print` rules in `src/index.css`—hiding navigation/input chrome, adding a print report header, expanding full multi-line **Researcher Notes**, preserving confidence legends/sparklines, chronological timelines, and D3 relationship graphs, and normalizing Dark Mode surfaces to high-contrast light paper ink.
 - **Real-Time `Live Activity` Scrollable Feed (`LiveActivityFeed` & `/api/activity/stream`)**: Scrollable dashboard event stream backed by Server-Sent Events (SSE) and `/api/activity` snapshot aggregation that updates in real time whenever threat alerts trigger, enrichments complete, CSV reports are saved, or provider logs record telemetry—complete with stream pause/resume, category tabs (`Threat Alerts`, `Investigations`, `System Events`), search filtering, and quick **Filter IOC / Open Run** pivots.
 - **Dashboard D3 `Relationship Graph` (`RelationshipGraphWidget` & `iocGraph`)**: Force-directed D3 network visualization uniting IPs, shared domains, file hashes, malware families (`LummaStealer`, `CobaltStrike`, `AgentTesla`, etc.), and ASN hosts across runs and the active session, featuring **`Shared Links Only`** hub filtering, clickable **`Shared Infrastructure Hubs`** spotlight chips, dashed amber hub rings, zoom/drag physics, and a **Selected Entity Inspector**.
 - **Risk Threshold Confidence Slider (`InvestigateView` & `riskScoring`)**: Persistent `0–100` minimum confidence slider with quick-jump presets (`All`, `25+`, `50+`, `75+`), active filter banner (`Hidden X low-risk`), and one-click reset that hides low-impact IOCs from both the **Summary Matrix** and **Unified Batch** tables across Standard and Bulk Input modes.
@@ -266,7 +270,7 @@ All screenshots below were captured directly from the running SoTI Web Workbench
 ### Results Matrix, Risk Threshold Slider, Sparklines & Quick Copy
 ![SoTI Results Matrix with Risk Threshold and Copy Actions](docs/screenshots/investigate-results-matrix.png)
 
-*Enriched **Summary Matrix** paired with the **Risk Threshold** confidence filter bar (`0–100` slider and `All`, `25+`, `50+`, `75+` presets), color-coded **Confidence Score Legend**, per-row inline **Copy to Clipboard** buttons beside every indicator value, **Trend** confidence sparklines, **`+ Tag`** / **`Watch`** triage controls, and **Export to CSV / Download JSON / Export Full Session** buttons.*
+*Enriched **Summary Matrix** with clickable ascending/descending column sorting (**`Indicator`**, **`Type`**, **`Source`**, **`Verdict`**, **`Risk Score`**, **`Last Seen`**, **`Score`**), the **Risk Threshold** confidence filter bar (`0–100` slider and `All`, `25+`, `50+`, `75+` presets), color-coded **Confidence Score Legend**, per-row inline **Copy to Clipboard** buttons beside every indicator value, **Trend** confidence sparklines, **`+ Tag`** / **`Watch`** triage controls, and **`Export Data` (`CSV` / `JSON` / `TXT Report`)**, **`Print / PDF`**, and **`Export Full Session`** controls.*
 
 ### Real-Time `Live Activity` Scrollable Feed (`Reports` Dashboard)
 ![SoTI Live Activity Feed](docs/screenshots/dashboard-live-activity.png)
@@ -333,7 +337,7 @@ SoTI/
 ├── reports/                                # Saved enrichment CSV exports (created at runtime)
 ├── src/                                    # React + TypeScript + Tailwind CSS Web Workbench
 │   ├── App.tsx                             # Root shell, theme, shortcuts, share loader, search
-│   ├── index.css                           # Tailwind CSS configuration and design tokens
+│   ├── index.css                           # Tailwind CSS configuration, design tokens & @media print rules
 │   ├── main.tsx                            # React DOM mount entry point
 │   ├── components/
 │   │   ├── CliSetupView.tsx                # CLI setup, GUI API key manager & custom sources
@@ -341,7 +345,7 @@ SoTI/
 │   │   ├── EmailAlertSettingsPanel.tsx     # Threshold-based SMTP alert rules UI
 │   │   ├── HelpModal.tsx                   # Workbench onboarding & provider setup guide
 │   │   ├── IndicatorFileUpload.tsx         # Local .csv/.txt IOC upload & parser
-│   │   ├── InvestigateView.tsx             # Standard/Bulk Input, Live Mode polling, tags, notes, exports
+│   │   ├── InvestigateView.tsx             # Standard/Bulk Input, Live Mode, auto-saved notes, Print/PDF, exports
 │   │   ├── IocEventTimeline.tsx            # Chronological UTC activity timeline component
 │   │   ├── IocNetworkGraph.tsx             # D3 force-directed IOC relationship graph
 │   │   ├── IocRegionHeatmap.tsx            # D3 interactive geographic IOC heatmap & filter
@@ -374,12 +378,14 @@ SoTI/
 │       ├── keyboardShortcuts.ts / .test.ts # Shortcut key matching & spec registry
 │       ├── liveActivity.ts / .test.ts      # Real-time activity event parsers, mergers & filters
 │       ├── livePolling.ts / .test.ts       # Live Mode polling intervals, countdown & delta tracking
+│       ├── notesAutoSave.ts / .test.ts     # Researcher Notes periodic localStorage auto-save helpers
 │       ├── notifications.ts / .test.ts     # Quota threshold & alert notifications
 │       ├── quota.ts / .test.ts             # Daily quota & failover calculation
 │       ├── reportPdf.ts / .test.ts         # jsPDF + html2canvas export preparation
 │       ├── reportSharing.ts / .test.ts     # Expiring report snapshot & clipboard formatter
 │       ├── reportsAnalytics.ts / .test.ts  # Verdict, confidence, and 30-day trend aggregation
-│       ├── resultsExport.ts / .test.ts     # Visible table CSV & JSON export builders
+│       ├── resultsExport.ts / .test.ts     # Visible table CSV, JSON & formatted TXT report builders
+│       ├── resultsTable.ts / .test.ts      # Results table column sorting & Last Seen UTC extraction
 │       ├── riskScoring.ts / .test.ts       # Weighted multi-provider confidence scoring
 │       ├── scheduler.ts / .test.ts         # Frontend schedule interval formatting
 │       ├── sessionExport.ts / .test.ts     # Portable full-session JSON serializer
@@ -389,6 +395,7 @@ SoTI/
 ├── tests/
 │   └── test_soti.py                        # Python CLI unit tests
 ├── .env.example                            # API key & optional SMTP/Gemini template
+├── .gitattributes                          # Line-ending & binary PNG attributes for GitHub rendering
 ├── index.html                              # HTML entry document
 ├── main.py                                 # Python CLI entry point
 ├── package.json                            # Node dependencies & scripts (`dev`, `build`, `start`, `lint`)

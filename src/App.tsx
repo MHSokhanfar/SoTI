@@ -36,6 +36,7 @@ import type { ReportMeta } from './utils/reportsAnalytics';
 import { parseShareTokenFromUrl, type SharedReportSnapshot } from './utils/reportSharing';
 import type { ScheduledJob } from './utils/scheduler';
 import { matchGlobalKeyboardShortcut } from './utils/keyboardShortcuts';
+import { loadNotesAutoSaveState } from './utils/notesAutoSave';
 import { DEFAULT_LIVE_POLL_SECONDS } from './utils/livePolling';
 import {
   applyThemeToDocument,
@@ -124,7 +125,8 @@ export default function App() {
     lastReportFile: null,
     lastRunMode: null,
     activeHistoryId: null,
-    researcherNotes: '',
+    researcherNotes:
+      typeof window !== 'undefined' ? loadNotesAutoSaveState(window.localStorage).draftNotes : '',
     analysisMode: 'standard',
     livePollingEnabled: false,
     livePollIntervalSec: DEFAULT_LIVE_POLL_SECONDS,

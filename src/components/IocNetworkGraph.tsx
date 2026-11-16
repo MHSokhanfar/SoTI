@@ -305,6 +305,7 @@ export function IocNetworkGraph({
       .selectAll('text')
       .data(simLinks)
       .join('text')
+      .attr('class', 'ioc-link-label')
       .attr('text-anchor', 'middle')
       .attr('font-size', '9px')
       .attr('font-family', 'ui-sans-serif, system-ui, sans-serif')
@@ -369,6 +370,7 @@ export function IocNetworkGraph({
     // Readable indicator label below node
     nodeElements
       .append('text')
+      .attr('class', 'ioc-node-label')
       .attr('y', (d) => (d.data.queried ? 35 : 29))
       .attr('text-anchor', 'middle')
       .attr('font-size', (d) => (d.data.queried ? '11px' : '10px'))
@@ -494,7 +496,7 @@ export function IocNetworkGraph({
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5 shrink-0 print:hidden">
           <button
             type="button"
             onClick={() => handleZoomStep(1.25)}
@@ -527,7 +529,7 @@ export function IocNetworkGraph({
 
       {fullGraph.queriedIndicators.length > 1 && (
         <div
-          className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30 px-5 py-2.5 md:px-6"
+          className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30 px-5 py-2.5 md:px-6 print:hidden"
           role="group"
           aria-label="Focus relationship graph by IOC"
         >
@@ -565,7 +567,7 @@ export function IocNetworkGraph({
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px]">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] print:grid-cols-[minmax(0,1fr)_230px]">
         <div className="relative bg-slate-50/70 dark:bg-slate-950/60 p-3 md:p-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-400">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -579,7 +581,7 @@ export function IocNetworkGraph({
                 );
               })}
             </div>
-            <span className="text-slate-500 dark:text-slate-400">Drag nodes · Scroll to zoom · Click to inspect</span>
+            <span className="text-slate-500 dark:text-slate-400 print:hidden">Drag nodes · Scroll to zoom · Click to inspect</span>
           </div>
 
           {graph.nodes.length > 0 ? (
@@ -588,7 +590,7 @@ export function IocNetworkGraph({
               viewBox="0 0 760 430"
               role="img"
               aria-label={`IOC relationship network graph with ${graph.nodes.length} nodes and ${graph.links.length} links`}
-              className="h-[340px] w-full rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-950 select-none sm:h-[420px]"
+              className="h-[340px] w-full rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-950 select-none sm:h-[420px] print:h-[340px]"
             />
           ) : (
             <div className="flex h-[320px] items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
@@ -620,7 +622,7 @@ export function IocNetworkGraph({
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 print:hidden">
                 <button
                   type="button"
                   onClick={() => handleCopyNodeValue(selectedNode)}
@@ -682,7 +684,7 @@ export function IocNetworkGraph({
                   Connected Entities ({selectedNodeLinks.length})
                 </p>
                 {selectedNodeLinks.length > 0 ? (
-                  <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto pr-1 text-xs">
+                  <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto print:max-h-none print:overflow-visible pr-1 text-xs">
                     {selectedNodeLinks.map(({ link, isOutgoing, peer }) => (
                       <li key={link.id}>
                         <button

@@ -35,12 +35,12 @@
     print-color-adjust: exact;
   }
 
-  .dark main :is(div, section, dl, table, thead, tbody, tr, th, td) {
+  .dark main :is(div, section, aside, ul, li, button, dl, table, thead, tbody, tr, th, td) {
     background-color: #ffffff !important;
     border-color: #cbd5e1 !important;
   }
 
-  .dark main :is(h1, h2, h3, h4, p, dt, dd, span, strong, code, td, th) {
+  .dark main :is(h1, h2, h3, h4, label, a, p, dt, dd, span, strong, code, td, th) {
     color: #0f172a !important;
   }
 
@@ -69,7 +69,30 @@
     color: #334155 !important;
   }
 
+  .dark main svg {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+  }
+
+  .dark main svg circle.ioc-node-halo,
+  .dark main svg circle.rel-node-halo {
+    fill: #ffffff !important;
+  }
+
+  .dark main svg .ioc-node-label,
+  .dark main svg .rel-node-label {
+    fill: #0f172a !important;
+    stroke: #ffffff !important;
+  }
+
+  .dark main svg .ioc-link-label,
+  .dark main svg .rel-link-label {
+    fill: #475569 !important;
+    stroke: #ffffff !important;
+  }
+
   header,
+  footer,
   [data-testid="reports-toast-container"],
   [data-testid="quota-notification-toasts"] {
     display: none !important;

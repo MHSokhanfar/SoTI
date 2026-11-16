@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { LookupResult } from './indicators';
 import {
+  buildFormattedResultsTxtReport,
   buildResultsJsonFilename,
+  buildResultsTxtFilename,
   buildStructuredResultsJsonPayload,
   CONFIDENCE_SCORE_LEGEND,
   RESULTS_EXPORT_SCHEMA,
@@ -66,3 +68,38 @@ test('buildStructuredResultsJsonPayload enriches visible rows with confidence sc
   const parsed = JSON.parse(serializeStructuredResultsJson(payload));
   assert.equal(parsed.rowCount, 1);
 });
+
+test('buildFormattedResultsTxtReport formats metadata, sort state, Last Seen, tags, and notes for manual reading', () => {
+  const row = makeRow({
+    indicator: 'evil.com',
+    type: 'domain',
+    details: { Malicious: 22, Suspicious: 0, 'Total Engines': 90, 'Last Seen': '2026-11-15T10:15:00Z' },
+  });
+  const fixedDate = new Date('2026-11-15T12:30:45.000Z');
+
+  assert.equal(
+    buildResultsTxtFilename('All', fixedDate),
+    'soti_report_20261115_123045.txt',
+  );
+
+  const txt = buildFormattedResultsTxtReport({
+    allResults: [row],
+    visibleResults: [row],
+    verdictFilter: 'All',
+    tagFilter: 'All',
+    riskThreshold: 50,
+    sortState: { key: 'riskScore', direction: 'desc' },
+    indicatorTags: { 'evil.com': ['Phishing', 'C2'] },
+    researcherNotes: 'Confirmed C2 domain during shift handoff.',
+    mode: 'sample',
+    now: fixedDate,
+  });
+
+  assert.match(txt, /SoTI — THREAT INTELLIGENCE INVESTIGATION REPORT/);
+  assert.match(txt, /Sort Order\s+:\s+riskScore \(DESC\)/);
+  assert.match(txt, /\[1\] evil\.com \(DOMAIN\) — VirusTotal/);
+  assert.match(txt, /Last Seen\s+:\s+2026-11-15 10:15 UTC/);
+  assert.match(txt, /Tags\s+:\s+Phishing, C2/);
+  assert.match(txt, /RESEARCHER NOTES[\s\S]+Confirmed C2 domain during shift handoff\./);
+});
+
