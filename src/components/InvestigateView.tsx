@@ -19,6 +19,7 @@ import {
   FileText,
   HelpCircle,
   Layers,
+  Link2,
   Mail,
   Printer,
   Radio,
@@ -56,6 +57,7 @@ import {
   type IndicatorFileSummary,
 } from './IndicatorFileUpload';
 import { RecentInvestigationsSidebar } from './RecentInvestigationsSidebar';
+import { QuickNotesSidebarPanel } from './QuickNotesSidebarPanel';
 import { WatchlistSidebarTab } from './WatchlistSidebarTab';
 import { IocNetworkGraph } from './IocNetworkGraph';
 import { IocEventTimeline } from './IocEventTimeline';
@@ -128,6 +130,15 @@ import {
   serializeExportedSessionJson,
 } from '../utils/sessionExport';
 import {
+  DEFAULT_QUICK_NOTES_STATE,
+  type QuickNotesState,
+} from '../utils/quickNotes';
+import {
+  buildSessionSnapshotUrl,
+  formatSnapshotPayloadSize,
+  type DecodedSessionSnapshot,
+} from '../utils/sessionSnapshot';
+import {
   createEmptyNotesAutoSaveState,
   formatAutoSaveUtcTimestamp,
   loadNotesAutoSaveState,
@@ -170,6 +181,7 @@ import {
   removeIocFromWatchlist,
   saveSidebarTab,
   saveWatchlist,
+  toggleIocInWatchlist,
   type SidebarTabId,
   type WatchlistItem,
 } from '../utils/watchlist';
@@ -228,6 +240,28 @@ interface InvestigateViewProps {
   recentRegionFilter?: string | null;
   onClearRecentRegionFilter?: () => void;
   onRecentHistoryChange?: (entries: RecentInvestigationEntry[]) => void;
+  quickNotesState?: QuickNotesState;
+  onChangeQuickNotesText?: (nextText: string) => void;
+  onClearQuickNotes?: () => void;
+  onToggleQuickNotesCollapsed?: () => void;
+  loadedSessionSnapshot?: DecodedSessionSnapshot | null;
+  sessionSnapshotError?: string | null;
+  onDismissSessionSnapshot?: () => void;
+  watchlistItems?: WatchlistItem[];
+  onToggleWatchIoc?: (
+    indicator: string,
+    type: IndicatorType,
+    verdict?: Verdict | null,
+    confidenceScore?: number | null,
+  ) => void;
+  onAddWatchlistIndicator?: (
+    rawInput: string,
+    options?: { verdict?: Verdict | null; confidenceScore?: number | null },
+  ) => { added: boolean; error?: string };
+  onRemoveWatchlistIndicator?: (indicator: string) => void;
+  onAcknowledgeWatchlistItem?: (indicator: string) => void;
+  onAcknowledgeAllWatchlist?: () => void;
+  onEvaluateWatchlistResults?: (results: readonly LookupResult[], checkedAtIso: string) => void;
 }
 
 const CORE_LABELS: Record<string, string> = {
@@ -405,6 +439,20 @@ export function InvestigateView({
   recentRegionFilter = null,
   onClearRecentRegionFilter,
   onRecentHistoryChange,
+  quickNotesState = DEFAULT_QUICK_NOTES_STATE,
+  onChangeQuickNotesText = () => {},
+  onClearQuickNotes = () => {},
+  onToggleQuickNotesCollapsed = () => {},
+  loadedSessionSnapshot = null,
+  sessionSnapshotError = null,
+  onDismissSessionSnapshot,
+  watchlistItems: controlledWatchlistItems,
+  onToggleWatchIoc,
+  onAddWatchlistIndicator,
+  onRemoveWatchlistIndicator,
+  onAcknowledgeWatchlistItem,
+  onAcknowledgeAllWatchlist,
+  onEvaluateWatchlistResults,
 }: InvestigateViewProps) {
   const [verdictFilter, setVerdictFilter] = useState<'All' | Verdict>('All');
   const [resultsTagFilter, setResultsTagFilter] = useState<string>('All');
@@ -441,6 +489,12 @@ export function InvestigateView({
   const [tableSort, setTableSort] = useState<ResultsSortState | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [sessionExportedFile, setSessionExportedFile] = useState<string | null>(null);
+  const [snapshotModalOpen, setSnapshotModalOpen] = useState(false);
+  const [snapshotUrl, setSnapshotUrl] = useState<string>('');
+  const [snapshotSizeLabel, setSnapshotSizeLabel] = useState<string>('');
+  const [snapshotTruncated, setSnapshotTruncated] = useState(false);
+  const [snapshotCopied, setSnapshotCopied] = useState(false);
+  const [appliedSnapshotCreatedAt, setAppliedSnapshotCreatedAt] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [isBackgroundPolling, setIsBackgroundPolling] = useState(false);
   const [nextPollAtMs, setNextPollAtMs] = useState<number | null>(null);
@@ -450,9 +504,11 @@ export function InvestigateView({
   const [sidebarTab, setSidebarTab] = useState<SidebarTabId>(() =>
     typeof window !== 'undefined' ? loadSidebarTab(window.localStorage) : 'recent',
   );
-  const [watchlistItems, setWatchlistItems] = useState<WatchlistItem[]>(() =>
-    typeof window !== 'undefined' ? loadWatchlist(window.localStorage) : [],
+  const [internalWatchlistItems, setInternalWatchlistItems] = useState<WatchlistItem[]>(() =>
+    controlledWatchlistItems ??
+    (typeof window !== 'undefined' ? loadWatchlist(window.localStorage) : []),
   );
+  const watchlistItems = controlledWatchlistItems ?? internalWatchlistItems;
   const [checkingWatchlist, setCheckingWatchlist] = useState(false);
   const [watchlistLastCheckedUtc, setWatchlistLastCheckedUtc] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
@@ -522,6 +578,22 @@ export function InvestigateView({
   }, [exportMenuOpen]);
 
   useEffect(() => {
+    if (!loadedSessionSnapshot || appliedSnapshotCreatedAt === loadedSessionSnapshot.createdAt) {
+      return;
+    }
+    setAppliedSnapshotCreatedAt(loadedSessionSnapshot.createdAt);
+    setVerdictFilter(loadedSessionSnapshot.verdictFilter);
+    setRiskThreshold(loadedSessionSnapshot.riskThreshold);
+    setTableSort(loadedSessionSnapshot.tableSort);
+    if (Object.keys(loadedSessionSnapshot.indicatorTags).length > 0) {
+      setIndicatorTags((prev) => ({
+        ...prev,
+        ...loadedSessionSnapshot.indicatorTags,
+      }));
+    }
+  }, [loadedSessionSnapshot, appliedSnapshotCreatedAt]);
+
+  useEffect(() => {
     if (typeof window !== 'undefined') {
       saveRecentInvestigations(window.localStorage, recentHistory);
     }
@@ -541,10 +613,11 @@ export function InvestigateView({
   }, [confidenceSnapshots]);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      saveWatchlist(window.localStorage, watchlistItems);
+    if (controlledWatchlistItems !== undefined || typeof window === 'undefined') {
+      return;
     }
-  }, [watchlistItems]);
+    saveWatchlist(window.localStorage, internalWatchlistItems);
+  }, [controlledWatchlistItems, internalWatchlistItems]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -892,6 +965,23 @@ export function InvestigateView({
     [filteredUnifiedBatchRows, tableSort, lastSeenByIndicator],
   );
 
+  const exportableVisibleResults = useMemo(() => {
+    if (!isBulkMode || bulkTableStyle !== 'unified') {
+      return sortedResults;
+    }
+    const orderIndex = new Map<string, number>();
+    sortedUnifiedBatchRows.forEach((row, idx) => {
+      orderIndex.set(row.indicator.trim().toLowerCase(), idx);
+    });
+    const allowed = new Set(orderIndex.keys());
+    const matching = sortedResults.filter((r) => allowed.has(r.indicator.trim().toLowerCase()));
+    return [...matching].sort((a, b) => {
+      const idxA = orderIndex.get(a.indicator.trim().toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+      const idxB = orderIndex.get(b.indicator.trim().toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+      return idxA - idxB;
+    });
+  }, [isBulkMode, bulkTableStyle, sortedResults, sortedUnifiedBatchRows]);
+
   function handleToggleTableSort(key: ResultsSortKey) {
     setTableSort((prev) => toggleResultsSortState(prev, key));
   }
@@ -922,29 +1012,36 @@ export function InvestigateView({
     verdict?: Verdict | null,
     confidenceScore?: number | null,
   ) {
-    setWatchlistItems((prev) => {
-      if (isWatchlistIndicator(prev, indicator)) {
-        return removeIocFromWatchlist(prev, indicator);
-      }
-      return addIocToWatchlist(prev, {
+    if (onToggleWatchIoc) {
+      onToggleWatchIoc(indicator, type, verdict, confidenceScore);
+      return;
+    }
+    setInternalWatchlistItems((prev) =>
+      toggleIocInWatchlist(prev, {
         indicator,
         type,
         verdict: verdict ?? null,
         confidenceScore: confidenceScore ?? null,
-      }).next;
-    });
+      }).next,
+    );
   }
 
   function handleAddToWatchlistFromSidebar(rawInput: string): { added: boolean; error?: string } {
     const normalizedKey = rawInput.trim().toLowerCase();
+    const conf = confidenceByIndicator.get(normalizedKey);
+    const verdict = overallVerdictByIndicator.get(normalizedKey) ?? null;
+    if (onAddWatchlistIndicator) {
+      return onAddWatchlistIndicator(rawInput, {
+        verdict,
+        confidenceScore: conf?.confidenceScore ?? null,
+      });
+    }
     const existing = watchlistItems.find(
       (item) => item.indicator.trim().toLowerCase() === normalizedKey,
     );
     if (existing) {
       return { added: false, error: 'Indicator is already monitored on your Watchlist.' };
     }
-    const conf = confidenceByIndicator.get(normalizedKey);
-    const verdict = overallVerdictByIndicator.get(normalizedKey) ?? null;
     const outcome = addIocToWatchlist(watchlistItems, {
       indicator: rawInput,
       verdict,
@@ -956,24 +1053,36 @@ export function InvestigateView({
       }
       return { added: false, error: 'Indicator is already monitored or invalid.' };
     }
-    setWatchlistItems(outcome.next);
+    setInternalWatchlistItems(outcome.next);
     return { added: true };
   }
 
   function handleRemoveFromWatchlist(indicator: string) {
-    setWatchlistItems((prev) => removeIocFromWatchlist(prev, indicator));
+    if (onRemoveWatchlistIndicator) {
+      onRemoveWatchlistIndicator(indicator);
+      return;
+    }
+    setInternalWatchlistItems((prev) => removeIocFromWatchlist(prev, indicator));
   }
 
   function handleAcknowledgeWatchlistItem(indicator: string) {
-    setWatchlistItems((prev) => markWatchlistItemSeen(prev, indicator));
+    if (onAcknowledgeWatchlistItem) {
+      onAcknowledgeWatchlistItem(indicator);
+      return;
+    }
+    setInternalWatchlistItems((prev) => markWatchlistItemSeen(prev, indicator));
   }
 
   function handleAcknowledgeAllWatchlist() {
-    setWatchlistItems((prev) => markAllWatchlistUpdatesSeen(prev));
+    if (onAcknowledgeAllWatchlist) {
+      onAcknowledgeAllWatchlist();
+      return;
+    }
+    setInternalWatchlistItems((prev) => markAllWatchlistUpdatesSeen(prev));
   }
 
   function handleInspectFromWatchlist(indicator: string) {
-    setWatchlistItems((prev) => markWatchlistItemSeen(prev, indicator));
+    handleAcknowledgeWatchlistItem(indicator);
     setErrorMsg(null);
     const matchesCurrent = state.results.some(
       (r) => r.indicator.trim().toLowerCase() === indicator.trim().toLowerCase(),
@@ -1018,9 +1127,13 @@ export function InvestigateView({
       const fetchedResults: LookupResult[] = Array.isArray(data?.results) ? data.results : [];
       const checkedIso = new Date().toISOString();
       if (fetchedResults.length > 0) {
-        setWatchlistItems((prev) =>
-          evaluateWatchlistUpdates(prev, fetchedResults, checkedIso).next,
-        );
+        if (onEvaluateWatchlistResults) {
+          onEvaluateWatchlistResults(fetchedResults, checkedIso);
+        } else {
+          setInternalWatchlistItems((prev) =>
+            evaluateWatchlistUpdates(prev, fetchedResults, checkedIso).next,
+          );
+        }
         setConfidenceSnapshots((prevSnaps) =>
           appendConfidenceSnapshot(prevSnaps, fetchedResults, checkedIso, 'live-poll'),
         );
@@ -1269,9 +1382,13 @@ export function InvestigateView({
           isBackground ? 'live-poll' : 'history',
         ),
       );
-      setWatchlistItems((prev) =>
-        evaluateWatchlistUpdates(prev, nextResults, delta.checkedAtIso).next,
-      );
+      if (onEvaluateWatchlistResults) {
+        onEvaluateWatchlistResults(nextResults, delta.checkedAtIso);
+      } else {
+        setInternalWatchlistItems((prev) =>
+          evaluateWatchlistUpdates(prev, nextResults, delta.checkedAtIso).next,
+        );
+      }
 
       if (isBackground) {
         onChangeState((prev) => ({
@@ -1546,9 +1663,9 @@ export function InvestigateView({
   }
 
   function handleExportResultsCsv() {
-    if (sortedResults.length === 0) return;
+    if (exportableVisibleResults.length === 0) return;
     setExportMenuOpen(false);
-    const csvContent = serializeResultsToCsv(sortedResults, new Date().toISOString());
+    const csvContent = serializeResultsToCsv(exportableVisibleResults, new Date().toISOString());
     const filename = buildInvestigationCsvFilename(verdictFilter);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1562,11 +1679,11 @@ export function InvestigateView({
   }
 
   function handleExportResultsJson() {
-    if (sortedResults.length === 0) return;
+    if (exportableVisibleResults.length === 0) return;
     setExportMenuOpen(false);
     const payload = buildStructuredResultsJsonPayload({
       allResults: state.results,
-      visibleResults: sortedResults,
+      visibleResults: exportableVisibleResults,
       verdictFilter,
       mode: state.lastRunMode,
     });
@@ -1584,11 +1701,11 @@ export function InvestigateView({
   }
 
   function handleExportResultsTxt() {
-    if (sortedResults.length === 0) return;
+    if (exportableVisibleResults.length === 0) return;
     setExportMenuOpen(false);
     const txtContent = buildFormattedResultsTxtReport({
       allResults: state.results,
-      visibleResults: sortedResults,
+      visibleResults: exportableVisibleResults,
       verdictFilter,
       tagFilter: resultsTagFilter,
       riskThreshold,
@@ -1648,6 +1765,40 @@ export function InvestigateView({
       window.clearTimeout(sessionExportTimerRef.current);
     }
     sessionExportTimerRef.current = window.setTimeout(() => setSessionExportedFile(null), 3500);
+  }
+
+  async function handleCreateSessionSnapshot() {
+    if (state.results.length === 0 || typeof window === 'undefined') return;
+    const built = buildSessionSnapshotUrl(window.location.href, {
+      analysisMode: state.analysisMode,
+      mode: state.mode,
+      lastRunMode: state.lastRunMode,
+      rawInput: state.rawInput,
+      source: state.source,
+      customSources: state.customSources,
+      useCustomSources: state.useCustomSources,
+      includeThreatFox: state.includeThreatFox,
+      includeUrlscan: state.includeUrlscan,
+      invalidTokens: state.invalidTokens,
+      quotaSkipped: state.quotaSkipped,
+      lastReportFile: state.lastReportFile,
+      researcherNotes: state.researcherNotes,
+      indicatorTags,
+      verdictFilter,
+      riskThreshold,
+      tableSort,
+      results: state.results,
+    });
+    setSnapshotUrl(built.url);
+    setSnapshotSizeLabel(formatSnapshotPayloadSize(built.byteLength));
+    setSnapshotTruncated(built.truncatedDetails);
+    setSnapshotModalOpen(true);
+
+    const copied = await copyToClipboard(built.url);
+    if (copied) {
+      setSnapshotCopied(true);
+      window.setTimeout(() => setSnapshotCopied(false), 2500);
+    }
   }
 
   function handlePrintInvestigation() {
@@ -1745,6 +1896,60 @@ export function InvestigateView({
 
   return (
     <div className="space-y-8">
+      {sessionSnapshotError && (
+        <div
+          role="alert"
+          data-testid="session-snapshot-error-banner"
+          className="flex items-center justify-between gap-3 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-xs text-amber-950 dark:text-amber-100 print:hidden"
+        >
+          <span>{sessionSnapshotError}</span>
+          {onDismissSessionSnapshot && (
+            <button
+              type="button"
+              onClick={onDismissSessionSnapshot}
+              aria-label="Dismiss session snapshot error"
+              className="rounded p-1 hover:bg-amber-100 dark:hover:bg-amber-900/50 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {loadedSessionSnapshot && (
+        <section
+          aria-label="Restored Session Snapshot"
+          data-testid="restored-session-snapshot-banner"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50/60 dark:bg-red-950/30 px-5 py-3.5 text-xs print:hidden"
+        >
+          <div className="flex items-start gap-2.5 min-w-0">
+            <Link2 className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+            <div className="space-y-0.5 min-w-0">
+              <p className="font-semibold text-slate-950 dark:text-slate-50">
+                Restored Investigation from Session Snapshot
+              </p>
+              <p className="font-mono text-[11px] text-slate-600 dark:text-slate-300 tabular-nums">
+                {loadedSessionSnapshot.indicatorCount} IOC{loadedSessionSnapshot.indicatorCount === 1 ? '' : 's'} ·{' '}
+                {loadedSessionSnapshot.results.length} provider finding{loadedSessionSnapshot.results.length === 1 ? '' : 's'} · Captured{' '}
+                {loadedSessionSnapshot.createdAt.slice(0, 16).replace('T', ' ')} UTC
+                {loadedSessionSnapshot.researcherNotes ? ' · Notes restored' : ''}
+              </p>
+            </div>
+          </div>
+          {onDismissSessionSnapshot && (
+            <button
+              type="button"
+              data-testid="dismiss-session-snapshot-banner"
+              onClick={onDismissSessionSnapshot}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Dismiss Notice</span>
+            </button>
+          )}
+        </section>
+      )}
+
       {showThresholdWarning && (
         <div
           role="alert"
@@ -2671,7 +2876,7 @@ export function InvestigateView({
                     <button
                       type="button"
                       data-testid="export-data-dropdown-button"
-                      disabled={sortedResults.length === 0}
+                      disabled={exportableVisibleResults.length === 0}
                       aria-haspopup="menu"
                       aria-expanded={exportMenuOpen}
                       aria-label="Export current table view as CSV, JSON, or TXT report"
@@ -2752,6 +2957,19 @@ export function InvestigateView({
                   >
                     <Printer className="h-3.5 w-3.5" aria-hidden="true" />
                     Print / PDF
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="session-snapshot-button"
+                    disabled={state.results.length === 0}
+                    onClick={handleCreateSessionSnapshot}
+                    aria-label="Create shareable browser Session Snapshot link"
+                    title="Serialize current investigation results, tags, filters, and notes into a shareable browser link"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                  >
+                    <Link2 className="h-3.5 w-3.5 text-red-600 dark:text-red-400" aria-hidden="true" />
+                    <span>Session Snapshot</span>
                   </button>
 
                   <button
@@ -3164,6 +3382,11 @@ export function InvestigateView({
                                     type="button"
                                     data-testid="row-watch-toggle-btn"
                                     aria-pressed={isWatched}
+                                    aria-label={
+                                      isWatched
+                                        ? `Remove ${row.indicator} from Watchlist`
+                                        : `Add ${row.indicator} to Watchlist`
+                                    }
                                     onClick={() =>
                                       handleToggleWatchIoc(
                                         row.indicator,
@@ -3449,6 +3672,11 @@ export function InvestigateView({
                                   type="button"
                                   data-testid="row-watch-toggle-btn"
                                   aria-pressed={isWatched}
+                                  aria-label={
+                                    isWatched
+                                      ? `Remove ${r.indicator} from Watchlist`
+                                      : `Add ${r.indicator} to Watchlist`
+                                  }
                                   onClick={() =>
                                     handleToggleWatchIoc(
                                       r.indicator,
@@ -3767,6 +3995,11 @@ export function InvestigateView({
                             type="button"
                             data-testid="card-watch-toggle-btn"
                             aria-pressed={isWatched}
+                            aria-label={
+                              isWatched
+                                ? `Remove ${group.indicator} from Watchlist`
+                                : `Add ${group.indicator} to Watchlist`
+                            }
                             onClick={() =>
                               handleToggleWatchIoc(
                                 group.indicator,
@@ -3998,91 +4231,234 @@ export function InvestigateView({
       )}
         </div>
 
-        <div className="lg:sticky lg:top-20 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden print:hidden">
-          <div
-            role="tablist"
-            aria-label="Investigation sidebar views"
-            data-testid="sidebar-tab-switcher"
-            className="grid grid-cols-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40"
-          >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sidebarTab === 'recent'}
-              data-testid="sidebar-tab-recent"
-              onClick={() => setSidebarTab('recent')}
-              className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold transition-colors cursor-pointer border-b-2 ${
-                sidebarTab === 'recent'
-                  ? 'border-red-600 text-slate-950 dark:text-slate-50 bg-white dark:bg-slate-900'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-              }`}
+        <div className="lg:sticky lg:top-20 space-y-4 print:hidden">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+            <div
+              role="tablist"
+              aria-label="Investigation sidebar views"
+              data-testid="sidebar-tab-switcher"
+              className="grid grid-cols-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40"
             >
-              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span>Recent</span>
-              <span className="font-mono text-[11px] font-normal text-slate-400 dark:text-slate-500 tabular-nums">
-                ({recentHistory.length})
-              </span>
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sidebarTab === 'watchlist'}
-              data-testid="sidebar-tab-watchlist"
-              onClick={() => setSidebarTab('watchlist')}
-              className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold transition-colors cursor-pointer border-b-2 ${
-                sidebarTab === 'watchlist'
-                  ? 'border-red-600 text-slate-950 dark:text-slate-50 bg-white dark:bg-slate-900'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-              }`}
-            >
-              <Eye className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span>Watchlist</span>
-              <span className="font-mono text-[11px] font-normal text-slate-400 dark:text-slate-500 tabular-nums">
-                ({watchlistItems.length})
-              </span>
-              {unreadWatchlistCount > 0 && (
-                <span
-                  data-testid="watchlist-notification-badge"
-                  aria-label={`${unreadWatchlistCount} unread watchlist updates`}
-                  className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white tabular-nums"
-                >
-                  {unreadWatchlistCount}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === 'recent'}
+                data-testid="sidebar-tab-recent"
+                onClick={() => setSidebarTab('recent')}
+                className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold transition-colors cursor-pointer border-b-2 ${
+                  sidebarTab === 'recent'
+                    ? 'border-red-600 text-slate-950 dark:text-slate-50 bg-white dark:bg-slate-900'
+                    : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                }`}
+              >
+                <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>Recent</span>
+                <span className="font-mono text-[11px] font-normal text-slate-400 dark:text-slate-500 tabular-nums">
+                  ({recentHistory.length})
                 </span>
-              )}
-            </button>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === 'watchlist'}
+                data-testid="sidebar-tab-watchlist"
+                onClick={() => setSidebarTab('watchlist')}
+                className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold transition-colors cursor-pointer border-b-2 ${
+                  sidebarTab === 'watchlist'
+                    ? 'border-red-600 text-slate-950 dark:text-slate-50 bg-white dark:bg-slate-900'
+                    : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                }`}
+              >
+                <Eye className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>Watchlist</span>
+                <span className="font-mono text-[11px] font-normal text-slate-400 dark:text-slate-500 tabular-nums">
+                  ({watchlistItems.length})
+                </span>
+                {unreadWatchlistCount > 0 && (
+                  <span
+                    data-testid="watchlist-notification-badge"
+                    aria-label={`${unreadWatchlistCount} unread watchlist updates`}
+                    className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white tabular-nums"
+                  >
+                    {unreadWatchlistCount}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {sidebarTab === 'recent' ? (
+              <RecentInvestigationsSidebar
+                embedded
+                entries={recentHistory}
+                indicatorTags={indicatorTags}
+                activeEntryId={activeHistoryId}
+                selectedRegion={recentRegionFilter}
+                onClearRegionFilter={onClearRecentRegionFilter}
+                isRunning={loading}
+                onViewDetails={handleViewRecentDetails}
+                onRerun={handleRerunRecent}
+                onTogglePinEntry={handleTogglePinRecent}
+                onRenameEntry={handleRenameRecent}
+                onRemoveEntry={handleRemoveRecent}
+                onClearAll={handleClearRecent}
+              />
+            ) : (
+              <WatchlistSidebarTab
+                items={watchlistItems}
+                isChecking={checkingWatchlist}
+                lastCheckedUtc={watchlistLastCheckedUtc}
+                onAddIndicator={handleAddToWatchlistFromSidebar}
+                onRemoveIndicator={handleRemoveFromWatchlist}
+                onCheckUpdatesNow={handleCheckWatchlistUpdates}
+                onInspectIndicator={handleInspectFromWatchlist}
+                onAcknowledgeItem={handleAcknowledgeWatchlistItem}
+                onAcknowledgeAll={handleAcknowledgeAllWatchlist}
+              />
+            )}
           </div>
 
-          {sidebarTab === 'recent' ? (
-            <RecentInvestigationsSidebar
-              embedded
-              entries={recentHistory}
-              indicatorTags={indicatorTags}
-              activeEntryId={activeHistoryId}
-              selectedRegion={recentRegionFilter}
-              onClearRegionFilter={onClearRecentRegionFilter}
-              isRunning={loading}
-              onViewDetails={handleViewRecentDetails}
-              onRerun={handleRerunRecent}
-              onTogglePinEntry={handleTogglePinRecent}
-              onRenameEntry={handleRenameRecent}
-              onRemoveEntry={handleRemoveRecent}
-              onClearAll={handleClearRecent}
-            />
-          ) : (
-            <WatchlistSidebarTab
-              items={watchlistItems}
-              isChecking={checkingWatchlist}
-              lastCheckedUtc={watchlistLastCheckedUtc}
-              onAddIndicator={handleAddToWatchlistFromSidebar}
-              onRemoveIndicator={handleRemoveFromWatchlist}
-              onCheckUpdatesNow={handleCheckWatchlistUpdates}
-              onInspectIndicator={handleInspectFromWatchlist}
-              onAcknowledgeItem={handleAcknowledgeWatchlistItem}
-              onAcknowledgeAll={handleAcknowledgeAllWatchlist}
-            />
-          )}
+          <QuickNotesSidebarPanel
+            variant="embedded"
+            notesState={quickNotesState}
+            onChangeText={onChangeQuickNotesText}
+            onClearText={onClearQuickNotes}
+            onToggleCollapse={onToggleQuickNotesCollapsed}
+          />
         </div>
       </div>
+
+      {snapshotModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-[1px] print:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="session-snapshot-modal-title"
+          data-testid="session-snapshot-modal"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setSnapshotModalOpen(false);
+            }
+          }}
+        >
+          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 px-5 py-4">
+              <div className="flex items-center gap-2 min-w-0">
+                <Link2 className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                <h2
+                  id="session-snapshot-modal-title"
+                  className="text-base font-semibold text-slate-950 dark:text-slate-50"
+                >
+                  Shareable Session Snapshot
+                </h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close session snapshot modal"
+                onClick={() => setSnapshotModalOpen(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-5 py-4 text-xs">
+              <p className="leading-relaxed text-slate-600 dark:text-slate-300">
+                Your current investigation results, indicator tags, active Risk Threshold / verdict filters, table sort state, and Researcher Notes are serialized directly into this browser-only URL. Anyone opening it picks up right where you left off.
+              </p>
+
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-slate-600 dark:text-slate-300 tabular-nums">
+                <span>{resultIndicatorsList.length} IOCs</span>
+                <span>·</span>
+                <span>{state.results.length} findings</span>
+                <span>·</span>
+                <span>Filter: {verdictFilter}</span>
+                {riskThreshold > 0 && (
+                  <>
+                    <span>·</span>
+                    <span>Min Risk: {riskThreshold}+</span>
+                  </>
+                )}
+                <span>·</span>
+                <span>Payload: {snapshotSizeLabel}</span>
+              </div>
+
+              {snapshotTruncated && (
+                <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-[11px] text-amber-900 dark:text-amber-200">
+                  Large batch detected — secondary metadata fields were trimmed to keep the browser URL compact while retaining all IOC verdicts, scores, tags, and notes.
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="session-snapshot-url-input"
+                  className="block font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Shareable Browser Link
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="session-snapshot-url-input"
+                    data-testid="session-snapshot-url-input"
+                    type="text"
+                    readOnly
+                    value={snapshotUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 font-mono text-[11px] text-slate-800 dark:text-slate-200 focus:border-red-600 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    data-testid="copy-session-snapshot-btn"
+                    onClick={async () => {
+                      const ok = await copyToClipboard(snapshotUrl);
+                      if (ok) {
+                        setSnapshotCopied(true);
+                        window.setTimeout(() => setSnapshotCopied(false), 2000);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-red-700 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    {snapshotCopied ? (
+                      <>
+                        <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Copy Link</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 px-5 py-3 text-xs">
+              <button
+                type="button"
+                data-testid="apply-session-snapshot-url-btn"
+                onClick={() => {
+                  if (typeof window !== 'undefined' && snapshotUrl) {
+                    window.history.replaceState({}, '', snapshotUrl);
+                    setSnapshotCopied(true);
+                    window.setTimeout(() => setSnapshotCopied(false), 1800);
+                  }
+                }}
+                className="font-medium text-slate-700 dark:text-slate-300 hover:text-red-700 dark:hover:text-red-400 hover:underline cursor-pointer"
+              >
+                Update Address Bar URL
+              </button>
+              <button
+                type="button"
+                onClick={() => setSnapshotModalOpen(false)}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

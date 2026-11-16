@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  Check,
   ChevronDown,
   ChevronUp,
   Clock,
+  Download,
   Eye,
   FileText,
   Filter,
@@ -17,10 +20,12 @@ import {
   X,
 } from 'lucide-react';
 import {
+  buildRecentHistoryExportFilename,
   formatInvestigationTitle,
   formatRelativeTime,
   getInvestigationDisplayTitle,
   getPrimaryVerdictBadge,
+  serializeRecentHistoryExportJson,
   sortRecentInvestigations,
   type RecentInvestigationEntry,
 } from '../utils/investigationHistory';
@@ -86,9 +91,12 @@ export function RecentInvestigationsSidebar({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [historyExported, setHistoryExported] = useState(false);
 
   const menuRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const exportTimerRef = useRef<number | null>(null);
 
   const availableTags = useMemo(
     () => getAllUniqueTags(entries, indicatorTags),
@@ -173,6 +181,58 @@ export function RecentInvestigationsSidebar({
     return () => window.cancelAnimationFrame(id);
   }, [renamingId]);
 
+  useEffect(() => {
+    if (!confirmClearOpen) return;
+    function handleEsc(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setConfirmClearOpen(false);
+      }
+    }
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [confirmClearOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (exportTimerRef.current !== null) {
+        window.clearTimeout(exportTimerRef.current);
+      }
+    };
+  }, []);
+
+  function handleExportHistory() {
+    if (entries.length === 0) return;
+    const now = new Date();
+    const json = serializeRecentHistoryExportJson(orderedEntries, now);
+    const filename = buildRecentHistoryExportFilename(now);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setHistoryExported(true);
+    if (exportTimerRef.current !== null) {
+      window.clearTimeout(exportTimerRef.current);
+    }
+    exportTimerRef.current = window.setTimeout(() => {
+      setHistoryExported(false);
+    }, 2000);
+  }
+
+  function handleConfirmClearHistory() {
+    setExpandedId(null);
+    setSelectedTag('All');
+    onClearRegionFilter?.();
+    setContextMenu(null);
+    setRenamingId(null);
+    setConfirmClearOpen(false);
+    onClearAll();
+  }
+
   function handleDetailsClick(entry: RecentInvestigationEntry) {
     setExpandedId((prev) => (prev === entry.id ? null : entry.id));
     onViewDetails(entry);
@@ -217,11 +277,11 @@ export function RecentInvestigationsSidebar({
           : 'rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden'
       }
     >
-      <div className="flex items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 px-4 py-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 px-4 py-3.5">
         <div className="flex items-center gap-2 min-w-0">
           <Clock className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
           <h2 className="text-sm font-semibold text-slate-950 dark:text-slate-50 truncate">
-            Recent Investigations
+            Recent
           </h2>
           <span className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
             ({selectedTag === 'All' && !hasRegionFilter ? entries.length : `${filteredEntries.length}/${entries.length}`})
@@ -229,22 +289,37 @@ export function RecentInvestigationsSidebar({
         </div>
 
         {entries.length > 0 && (
-          <button
-            type="button"
-            data-testid="clear-recent-investigations"
-            aria-label="Clear all recent investigations"
-            onClick={() => {
-              setExpandedId(null);
-              setSelectedTag('All');
-              onClearRegionFilter?.();
-              setContextMenu(null);
-              setRenamingId(null);
-              onClearAll();
-            }}
-            className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 hover:border-red-300 dark:hover:border-red-800 hover:text-red-700 dark:hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Clear All
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              data-testid="export-recent-history-btn"
+              aria-label="Export recent investigation history as JSON"
+              title="Download investigation IDs and timestamps as JSON"
+              onClick={handleExportHistory}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {historyExported ? (
+                <>
+                  <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                  <span>Exported</span>
+                </>
+              ) : (
+                <>
+                  <Download className="h-3 w-3" aria-hidden="true" />
+                  <span>Export</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              data-testid="clear-recent-investigations"
+              aria-label="Clear recent investigation history"
+              onClick={() => setConfirmClearOpen(true)}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-red-300 dark:hover:border-red-800 hover:text-red-700 dark:hover:text-red-400 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Clear History
+            </button>
+          </div>
         )}
       </div>
 
@@ -728,6 +803,79 @@ export function RecentInvestigationsSidebar({
             <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <span>Delete</span>
           </button>
+        </div>
+      )}
+
+      {confirmClearOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="clear-history-dialog-title"
+          data-testid="clear-history-confirm-dialog"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setConfirmClearOpen(false);
+            }
+          }}
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
+            <div className="flex items-start gap-3 border-b border-slate-100 dark:border-slate-800 px-5 py-4">
+              <div className="rounded-lg bg-red-50 dark:bg-red-950/50 p-2 text-red-600 dark:text-red-400 shrink-0">
+                <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3
+                  id="clear-history-dialog-title"
+                  className="text-sm font-semibold text-slate-950 dark:text-slate-50"
+                >
+                  Clear Investigation History?
+                </h3>
+                <p className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+                  This will permanently remove all{' '}
+                  <span className="font-mono font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
+                    {entries.length}
+                  </span>{' '}
+                  saved investigation{entries.length === 1 ? '' : 's'}
+                  {entries.some((e) => e.pinned)
+                    ? ` (including ${entries.filter((e) => e.pinned).length} pinned)`
+                    : ''}{' '}
+                  from your browser storage. Consider exporting your history first if you need an audit trail.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50/70 dark:bg-slate-950/60 px-5 py-3">
+              <button
+                type="button"
+                onClick={handleExportHistory}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white hover:underline cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Export JSON First</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="clear-history-cancel-btn"
+                  onClick={() => setConfirmClearOpen(false)}
+                  className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  data-testid="clear-history-confirm-btn"
+                  onClick={handleConfirmClearHistory}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Clear History</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </aside>

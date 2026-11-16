@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { LookupResult } from './indicators';
 import {
+  buildRecentHistoryExportFilename,
+  buildRecentHistoryExportPayload,
   buildRecentInvestigationEntry,
   clearRecentInvestigations,
   formatInvestigationTitle,
@@ -14,6 +16,7 @@ import {
   removeRecentInvestigation,
   renameRecentInvestigation,
   saveRecentInvestigations,
+  serializeRecentHistoryExportJson,
   sortRecentInvestigations,
   summarizeLookupVerdicts,
   togglePinRecentInvestigation,
@@ -275,3 +278,47 @@ test('pinning keeps entries anchored at the top, survives prepend capacity limit
   const unpinned = togglePinRecentInvestigation(reverted, 'run-a');
   assert.equal(unpinned.find((x) => x.id === 'run-a')?.pinned, undefined);
 });
+
+test('recent investigation history JSON export includes IDs, timestamps, and metadata cleanly', () => {
+  const exportedAt = new Date('2026-11-16T03:20:05.000Z');
+  assert.equal(
+    buildRecentHistoryExportFilename(exportedAt),
+    'soti_investigation_history_20261116_032005.json',
+  );
+
+  const e1 = buildRecentInvestigationEntry({
+    id: 'inv_17000001_ab12',
+    rawInput: '1.2.3.4, evil.com',
+    normalizedInput: '1.2.3.4, evil.com',
+    indicators: ['1.2.3.4', 'evil.com'],
+    source: 'all',
+    customSources: [],
+    useCustomSources: false,
+    sourceLabels: ['VirusTotal', 'AbuseIPDB'],
+    mode: 'sample',
+    results: [makeResult({ verdict: 'Malicious' })],
+    invalidTokens: [],
+    quotaSkipped: [],
+    reportFile: 'soti_20261116_031900.csv',
+    tags: ['C2'],
+    notes: 'Confirmed infrastructure link',
+    pinned: true,
+    customTitle: 'Priority Triage',
+    now: new Date('2026-11-16T03:19:00.000Z'),
+  });
+
+  const payload = buildRecentHistoryExportPayload([e1], exportedAt);
+  assert.equal(payload.exportedAt, '2026-11-16T03:20:05.000Z');
+  assert.equal(payload.totalEntries, 1);
+  assert.equal(payload.investigations[0].id, 'inv_17000001_ab12');
+  assert.equal(payload.investigations[0].createdAt, '2026-11-16T03:19:00.000Z');
+  assert.equal(payload.investigations[0].timestamp, '2026-11-16T03:19:00.000Z');
+  assert.equal(payload.investigations[0].title, 'Priority Triage');
+  assert.equal(payload.investigations[0].pinned, true);
+  assert.deepEqual(payload.investigations[0].tags, ['C2']);
+
+  const parsed = JSON.parse(serializeRecentHistoryExportJson([], exportedAt));
+  assert.equal(parsed.totalEntries, 0);
+  assert.deepEqual(parsed.investigations, []);
+});
+

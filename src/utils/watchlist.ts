@@ -114,6 +114,31 @@ export function removeIocFromWatchlist(
   return items.filter((item) => normalizeKey(item.indicator) !== key);
 }
 
+export function toggleIocInWatchlist(
+  items: readonly WatchlistItem[],
+  params: {
+    indicator: string;
+    type?: IndicatorType;
+    verdict?: Verdict | null;
+    confidenceScore?: number | null;
+    now?: Date;
+  },
+): { next: WatchlistItem[]; watched: boolean; indicator: string | null } {
+  if (isWatchlistIndicator(items, params.indicator)) {
+    return {
+      next: removeIocFromWatchlist(items, params.indicator),
+      watched: false,
+      indicator: params.indicator.trim(),
+    };
+  }
+  const outcome = addIocToWatchlist(items, params);
+  return {
+    next: outcome.next,
+    watched: outcome.added !== null,
+    indicator: outcome.added?.indicator ?? null,
+  };
+}
+
 export function evaluateWatchlistUpdates(
   items: readonly WatchlistItem[],
   results: readonly LookupResult[],

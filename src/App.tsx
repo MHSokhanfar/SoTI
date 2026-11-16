@@ -13,6 +13,7 @@ import { CliSetupView } from './components/CliSetupView';
 import { HelpModal } from './components/HelpModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { NotificationCenter } from './components/NotificationCenter';
+import { QuickNotesSidebarPanel } from './components/QuickNotesSidebarPanel';
 import {
   ALL_SOURCE_IDS,
   cloneDefaultApiSettings,
@@ -39,12 +40,39 @@ import { matchGlobalKeyboardShortcut } from './utils/keyboardShortcuts';
 import { loadNotesAutoSaveState } from './utils/notesAutoSave';
 import { DEFAULT_LIVE_POLL_SECONDS } from './utils/livePolling';
 import {
+  clearQuickNotesState,
+  DEFAULT_QUICK_NOTES_STATE,
+  loadQuickNotes,
+  saveQuickNotes,
+  toggleQuickNotesCollapsed,
+  updateQuickNotesText,
+  type QuickNotesState,
+} from './utils/quickNotes';
+import {
+  decodeSessionSnapshot,
+  parseSessionSnapshotTokenFromLocation,
+  stripSessionSnapshotFromUrl,
+  type DecodedSessionSnapshot,
+} from './utils/sessionSnapshot';
+import {
   applyThemeToDocument,
   resolveInitialTheme,
   THEME_STORAGE_KEY,
   toggleThemeMode,
   type ThemeMode,
 } from './utils/theme';
+import {
+  addIocToWatchlist,
+  evaluateWatchlistUpdates,
+  loadWatchlist,
+  markAllWatchlistUpdatesSeen,
+  markWatchlistItemSeen,
+  removeIocFromWatchlist,
+  saveWatchlist,
+  toggleIocInWatchlist,
+  type WatchlistItem,
+} from './utils/watchlist';
+import type { IndicatorType, LookupResult, Verdict } from './utils/indicators';
 
 interface ConfigStatus {
   keys: ApiKeyStatus;
@@ -91,6 +119,18 @@ export default function App() {
   const [recentHistory, setRecentHistory] = useState<RecentInvestigationEntry[]>(() =>
     typeof window !== 'undefined' ? loadRecentInvestigations(window.localStorage) : [],
   );
+  const [watchlistItems, setWatchlistItems] = useState<WatchlistItem[]>(() =>
+    typeof window !== 'undefined' ? loadWatchlist(window.localStorage) : [],
+  );
+  const [quickNotes, setQuickNotes] = useState<QuickNotesState>(() =>
+    typeof window !== 'undefined'
+      ? loadQuickNotes(window.localStorage)
+      : { ...DEFAULT_QUICK_NOTES_STATE },
+  );
+  const [quickNotesDrawerOpen, setQuickNotesDrawerOpen] = useState(false);
+  const [loadedSessionSnapshot, setLoadedSessionSnapshot] =
+    useState<DecodedSessionSnapshot | null>(null);
+  const [sessionSnapshotError, setSessionSnapshotError] = useState<string | null>(null);
   const lastSearchSyncRef = useRef<number>(0);
 
   const [investigateNav, setInvestigateNav] = useState<InvestigateNavigationTarget | null>(null);
@@ -110,7 +150,7 @@ export default function App() {
     date: new Date().toISOString().slice(0, 10),
     providers: [],
   });
-  const [connectionOverrides, setConnectionOverrides] = useState<Partial<Record<SourceId, boolean>>>({});
+  const [connectionOverrides, setConnectionOverrides] = useState<Record<string, boolean>>({});
   const [investigationState, setInvestigationState] = useState<InvestigationState>({
     rawInput: SAMPLE_BATCH,
     source: 'all',
@@ -253,6 +293,54 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveQuickNotes(window.localStorage, quickNotes);
+    }
+  }, [quickNotes]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveWatchlist(window.localStorage, watchlistItems);
+    }
+  }, [watchlistItems]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const snapshotToken = parseSessionSnapshotTokenFromLocation(
+      window.location.search,
+      window.location.hash,
+    );
+    if (!snapshotToken) return;
+    const decoded = decodeSessionSnapshot(snapshotToken);
+    setActiveTab('investigate');
+    if (!decoded) {
+      setSessionSnapshotError('Unable to restore Session Snapshot: the link is invalid or corrupted.');
+      return;
+    }
+    setSessionSnapshotError(null);
+    setLoadedSessionSnapshot(decoded);
+    setInvestigationState((prev) => ({
+      ...prev,
+      rawInput: decoded.rawInput || prev.rawInput,
+      source: decoded.source,
+      customSources: decoded.customSources.length > 0 ? decoded.customSources : prev.customSources,
+      useCustomSources: decoded.useCustomSources,
+      includeThreatFox: decoded.includeThreatFox,
+      includeUrlscan: decoded.includeUrlscan,
+      mode: decoded.mode,
+      lastRunMode: decoded.lastRunMode,
+      results: decoded.results,
+      invalidTokens: decoded.invalidTokens,
+      quotaSkipped: decoded.quotaSkipped,
+      lastReportFile: decoded.lastReportFile,
+      researcherNotes: decoded.researcherNotes,
+      analysisMode: decoded.analysisMode,
+      activeHistoryId: null,
+      livePollingEnabled: false,
+    }));
+  }, []);
+
+  useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
       const action = matchGlobalKeyboardShortcut(event);
       if (!action) return;
@@ -261,6 +349,7 @@ export default function App() {
         if (shortcutsOpen) setShortcutsOpen(false);
         if (helpOpen) setHelpOpen(false);
         if (notificationsOpen) setNotificationsOpen(false);
+        if (quickNotesDrawerOpen) setQuickNotesDrawerOpen(false);
         return;
       }
 
@@ -298,7 +387,7 @@ export default function App() {
     return () => {
       document.removeEventListener('keydown', handleGlobalKeyDown);
     };
-  }, [shortcutsOpen, helpOpen, notificationsOpen]);
+  }, [shortcutsOpen, helpOpen, notificationsOpen, quickNotesDrawerOpen]);
 
   useEffect(() => {
     applyThemeToDocument(theme);
@@ -383,6 +472,105 @@ export default function App() {
     setEmailAlertsRefreshNonce((n) => n + 1);
   }, []);
 
+  const handleToggleWatchIoc = useCallback(
+    (
+      indicator: string,
+      type: IndicatorType,
+      verdict?: Verdict | null,
+      confidenceScore?: number | null,
+    ) => {
+      setWatchlistItems((prev) =>
+        toggleIocInWatchlist(prev, {
+          indicator,
+          type,
+          verdict: verdict ?? null,
+          confidenceScore: confidenceScore ?? null,
+        }).next,
+      );
+    },
+    [],
+  );
+
+  const handleAddWatchlistIndicator = useCallback(
+    (
+      rawInput: string,
+      options?: { verdict?: Verdict | null; confidenceScore?: number | null },
+    ): { added: boolean; error?: string } => {
+      const normalizedKey = rawInput.trim().toLowerCase();
+      if (watchlistItems.some((item) => item.indicator.trim().toLowerCase() === normalizedKey)) {
+        return {
+          added: false,
+          error: 'Indicator is already monitored on your Watchlist.',
+        };
+      }
+      const res = addIocToWatchlist(watchlistItems, {
+        indicator: rawInput,
+        verdict: options?.verdict ?? null,
+        confidenceScore: options?.confidenceScore ?? null,
+      });
+      if (!res.added) {
+        return {
+          added: false,
+          error:
+            res.invalid.length > 0
+              ? `Unsupported indicator format: ${res.invalid[0]}`
+              : 'Indicator is already monitored or invalid.',
+        };
+      }
+      setWatchlistItems(res.next);
+      return { added: true };
+    },
+    [watchlistItems],
+  );
+
+  const handleRemoveWatchlistIndicator = useCallback((indicator: string) => {
+    setWatchlistItems((prev) => removeIocFromWatchlist(prev, indicator));
+  }, []);
+
+  const handleAcknowledgeWatchlistItem = useCallback((indicator: string) => {
+    setWatchlistItems((prev) => markWatchlistItemSeen(prev, indicator));
+  }, []);
+
+  const handleAcknowledgeAllWatchlist = useCallback(() => {
+    setWatchlistItems((prev) => markAllWatchlistUpdatesSeen(prev));
+  }, []);
+
+  const handleEvaluateWatchlistResults = useCallback(
+    (results: readonly LookupResult[], checkedAtIso: string) => {
+      setWatchlistItems((prev) => evaluateWatchlistUpdates(prev, results, checkedAtIso).next);
+    },
+    [],
+  );
+
+  const handleTestProviderFromTopBar = useCallback(
+    async (providerId: string): Promise<{ ok: boolean; message?: string }> => {
+      try {
+        const resp = await fetch('/api/config/apis/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: providerId,
+            timeoutSeconds: apiSettings.timeoutSeconds,
+          }),
+        });
+        const data = await resp.json();
+        const ok = Boolean(data?.ok);
+        setConnectionOverrides((prev) => ({ ...prev, [providerId]: ok }));
+        if (data?.quota?.date && Array.isArray(data?.quota?.providers)) {
+          setQuotaState(data.quota);
+        }
+        return {
+          ok,
+          message: data?.message || data?.error || (ok ? 'Verified' : 'Check failed'),
+        };
+      } catch {
+        setConnectionOverrides((prev) => ({ ...prev, [providerId]: false }));
+        return { ok: false, message: 'Server unreachable' };
+      }
+    },
+    [apiSettings.timeoutSeconds],
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
       <TopBar
@@ -390,6 +578,11 @@ export default function App() {
         onSelectTab={setActiveTab}
         latestReport={latestReport}
         apiStatus={effectiveApiStatus}
+        extraKeyStatus={configStatus.extraKeys}
+        customKeyStatus={configStatus.customKeys}
+        apiSettings={apiSettings}
+        connectionOverrides={connectionOverrides}
+        onTestProvider={handleTestProviderFromTopBar}
         onOpenHelp={() => setHelpOpen(true)}
         onOpenShortcuts={() => setShortcutsOpen(true)}
         theme={theme}
@@ -404,6 +597,9 @@ export default function App() {
         searchFocusNonce={searchFocusNonce}
         onSearchFocus={() => refreshGlobalSearchData(false)}
         onSelectSearchResult={handleSelectGlobalSearchResult}
+        quickNotesOpen={quickNotesDrawerOpen}
+        quickNotesHasContent={quickNotes.text.trim().length > 0}
+        onToggleQuickNotes={() => setQuickNotesDrawerOpen((prev) => !prev)}
       />
 
       <NotificationCenter
@@ -422,6 +618,26 @@ export default function App() {
         onEmailAlertDispatched={handleEmailAlertDispatched}
         onClearEmailAlerts={() => setDispatchedEmailAlerts([])}
       />
+
+      {quickNotesDrawerOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end print:hidden" role="dialog" aria-modal="true" aria-label="Quick Notes sidebar">
+          <div
+            className="fixed inset-0 bg-slate-950/35 backdrop-blur-[1px]"
+            onClick={() => setQuickNotesDrawerOpen(false)}
+          />
+          <aside className="relative z-10 h-full w-full max-w-sm border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
+            <QuickNotesSidebarPanel
+              variant="drawer"
+              notesState={quickNotes}
+              onChangeText={(nextText) =>
+                setQuickNotes((prev) => updateQuickNotesText(prev, nextText))
+              }
+              onClearText={() => setQuickNotes((prev) => clearQuickNotesState(prev))}
+              onCloseDrawer={() => setQuickNotesDrawerOpen(false)}
+            />
+          </aside>
+        </div>
+      )}
 
       <main className="mx-auto max-w-[1280px] px-4 py-6 md:px-6 md:py-8">
         {activeTab === 'investigate' && (
@@ -448,6 +664,31 @@ export default function App() {
             recentRegionFilter={recentRegionFilter}
             onClearRecentRegionFilter={() => setRecentRegionFilter(null)}
             onRecentHistoryChange={setRecentHistory}
+            watchlistItems={watchlistItems}
+            onToggleWatchIoc={handleToggleWatchIoc}
+            onAddWatchlistIndicator={handleAddWatchlistIndicator}
+            onRemoveWatchlistIndicator={handleRemoveWatchlistIndicator}
+            onAcknowledgeWatchlistItem={handleAcknowledgeWatchlistItem}
+            onAcknowledgeAllWatchlist={handleAcknowledgeAllWatchlist}
+            onEvaluateWatchlistResults={handleEvaluateWatchlistResults}
+            quickNotesState={quickNotes}
+            onChangeQuickNotesText={(nextText) =>
+              setQuickNotes((prev) => updateQuickNotesText(prev, nextText))
+            }
+            onClearQuickNotes={() => setQuickNotes((prev) => clearQuickNotesState(prev))}
+            onToggleQuickNotesCollapsed={() =>
+              setQuickNotes((prev) => toggleQuickNotesCollapsed(prev))
+            }
+            loadedSessionSnapshot={loadedSessionSnapshot}
+            sessionSnapshotError={sessionSnapshotError}
+            onDismissSessionSnapshot={() => {
+              setLoadedSessionSnapshot(null);
+              setSessionSnapshotError(null);
+              if (typeof window !== 'undefined') {
+                const cleanedHref = stripSessionSnapshotFromUrl(window.location.href);
+                window.history.replaceState({}, '', cleanedHref);
+              }
+            }}
           />
         )}
         {activeTab === 'reports' && (
@@ -505,9 +746,7 @@ export default function App() {
             onKeyStatusUpdated={refreshConfigStatus}
             onQuotaChange={setQuotaState}
             onConnectionTestResult={(provider, ok) => {
-              if (provider === 'virustotal' || provider === 'abuseipdb' || provider === 'alienvault') {
-                setConnectionOverrides((prev) => ({ ...prev, [provider]: ok }));
-              }
+              setConnectionOverrides((prev) => ({ ...prev, [provider]: ok }));
             }}
             onConnectionOverridesReset={() => setConnectionOverrides({})}
             onOpenHelp={() => setHelpOpen(true)}

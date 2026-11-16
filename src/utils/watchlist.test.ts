@@ -14,6 +14,7 @@ import {
   removeIocFromWatchlist,
   saveSidebarTab,
   saveWatchlist,
+  toggleIocInWatchlist,
   WATCHLIST_STORAGE_KEY,
 } from './watchlist';
 
@@ -122,3 +123,27 @@ test('loadWatchlist, saveWatchlist, loadSidebarTab, and saveSidebarTab persist c
   saveSidebarTab(storage, 'watchlist');
   assert.equal(loadSidebarTab(storage), 'watchlist');
 });
+
+test('toggleIocInWatchlist toggles IP, domain, and file hashes in state cleanly', () => {
+  const hash = '44d88612fea8a8f36de82e1278abb02f';
+  let items = toggleIocInWatchlist([], { indicator: '1[.]2[.]3[.]4', verdict: 'Malicious', confidenceScore: 80 });
+  assert.equal(items.watched, true);
+  assert.equal(items.indicator, '1.2.3.4');
+
+  items = toggleIocInWatchlist(items.next, { indicator: 'evil.com', verdict: 'Suspicious', confidenceScore: 55 });
+  assert.equal(items.watched, true);
+  assert.equal(items.next.length, 2);
+
+  items = toggleIocInWatchlist(items.next, { indicator: hash, verdict: 'Malicious', confidenceScore: 95 });
+  assert.equal(items.watched, true);
+  assert.equal(items.next.length, 3);
+  assert.equal(items.next[0].type, 'hash');
+
+  // Toggle off the IP indicator
+  items = toggleIocInWatchlist(items.next, { indicator: '1.2.3.4' });
+  assert.equal(items.watched, false);
+  assert.equal(items.next.length, 2);
+  assert.equal(isWatchlistIndicator(items.next, '1.2.3.4'), false);
+  assert.equal(isWatchlistIndicator(items.next, hash), true);
+});
+

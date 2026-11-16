@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   Bell,
   CalendarClock,
+  ChevronDown,
   Download,
   FileSpreadsheet,
   HelpCircle,
@@ -12,10 +14,21 @@ import {
   Search,
   Server,
   ShieldAlert,
+  SlidersHorizontal,
+  StickyNote,
   Sun,
   X,
 } from 'lucide-react';
-import type { ApiKeyStatus } from '../utils/apiConfig';
+import {
+  buildTopBarApiStatuses,
+  cloneDefaultApiSettings,
+  summarizeTopBarApiGroup,
+  type ApiKeyStatus,
+  type ApiSettings,
+  type BuiltinExtraSourceId,
+  type TopBarProviderStatusItem,
+  type TopBarProviderStatusState,
+} from '../utils/apiConfig';
 import {
   searchGlobalEntries,
   type GlobalSearchEntry,
@@ -23,7 +36,6 @@ import {
   type SearchableTab,
   type VerdictTone,
 } from '../utils/globalSearch';
-import type { SourceId } from '../utils/indicators';
 import type { ThemeMode } from '../utils/theme';
 
 export type ActiveTab = 'investigate' | 'reports' | 'scheduled' | 'logs' | 'cli';
@@ -33,6 +45,11 @@ interface TopBarProps {
   onSelectTab: (tab: ActiveTab) => void;
   latestReport: string | null;
   apiStatus: ApiKeyStatus;
+  extraKeyStatus?: Partial<Record<BuiltinExtraSourceId, boolean>>;
+  customKeyStatus?: Record<string, boolean>;
+  apiSettings?: ApiSettings;
+  connectionOverrides?: Record<string, boolean | undefined>;
+  onTestProvider?: (providerId: string) => Promise<{ ok: boolean; message?: string }>;
   onOpenHelp: () => void;
   theme: ThemeMode;
   onToggleTheme: () => void;
@@ -44,6 +61,9 @@ interface TopBarProps {
   onSearchFocus?: () => void;
   onOpenShortcuts?: () => void;
   onSelectSearchResult: (entry: GlobalSearchEntry, query: string) => void;
+  quickNotesOpen?: boolean;
+  quickNotesHasContent?: boolean;
+  onToggleQuickNotes?: () => void;
 }
 
 const NAV_ITEMS: { id: ActiveTab; label: string }[] = [
@@ -54,11 +74,45 @@ const NAV_ITEMS: { id: ActiveTab; label: string }[] = [
   { id: 'cli', label: 'CLI & APIs' },
 ];
 
-const API_DOT_ITEMS: { id: SourceId; fullLabel: string; shortLabel: string }[] = [
-  { id: 'virustotal', fullLabel: 'VirusTotal', shortLabel: 'VT' },
-  { id: 'abuseipdb', fullLabel: 'AbuseIPDB', shortLabel: 'Abuse' },
-  { id: 'alienvault', fullLabel: 'AlienVault', shortLabel: 'OTX' },
-];
+function getProviderDotClass(item: TopBarProviderStatusItem): string {
+  switch (item.status) {
+    case 'connected':
+      return 'bg-emerald-500';
+    case 'unconfigured':
+    case 'failed':
+      return 'bg-red-600 dark:bg-red-500';
+    case 'disabled':
+      return item.configured
+        ? 'bg-amber-500'
+        : 'bg-slate-300 dark:bg-slate-600';
+  }
+}
+
+function getProviderTextClass(status: TopBarProviderStatusState): string {
+  switch (status) {
+    case 'connected':
+      return 'text-slate-700 dark:text-slate-300';
+    case 'unconfigured':
+    case 'failed':
+      return 'text-red-700 dark:text-red-400';
+    case 'disabled':
+      return 'text-slate-500 dark:text-slate-400';
+  }
+}
+
+function getStatusBadgeTextClass(item: TopBarProviderStatusItem): string {
+  switch (item.status) {
+    case 'connected':
+      return 'text-emerald-700 dark:text-emerald-400';
+    case 'unconfigured':
+    case 'failed':
+      return 'text-red-700 dark:text-red-400';
+    case 'disabled':
+      return item.configured
+        ? 'text-amber-700 dark:text-amber-400'
+        : 'text-slate-500 dark:text-slate-400';
+  }
+}
 
 const SEARCH_TAB_FILTERS: { id: 'all' | SearchableTab; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -104,6 +158,11 @@ export function TopBar({
   onSelectTab,
   latestReport,
   apiStatus,
+  extraKeyStatus = {},
+  customKeyStatus = {},
+  apiSettings,
+  connectionOverrides = {},
+  onTestProvider,
   onOpenHelp,
   theme,
   onToggleTheme,
@@ -115,15 +174,61 @@ export function TopBar({
   onSearchFocus,
   onOpenShortcuts,
   onSelectSearchResult,
+  quickNotesOpen = false,
+  quickNotesHasContent = false,
+  onToggleQuickNotes,
 }: TopBarProps) {
   const isDark = theme === 'dark';
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [tabFilter, setTabFilter] = useState<'all' | SearchableTab>('all');
   const [activeIndex, setActiveIndex] = useState(0);
+  const [apiPopoverOpen, setApiPopoverOpen] = useState(false);
+  const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
+  const [testMessages, setTestMessages] = useState<Record<string, { ok: boolean; text: string }>>({});
+
+  const resolvedSettings = useMemo(
+    () => apiSettings ?? cloneDefaultApiSettings(),
+    [apiSettings],
+  );
+
+  const allApiStatuses = useMemo(
+    () =>
+      buildTopBarApiStatuses({
+        apiSettings: resolvedSettings,
+        keyStatus: apiStatus,
+        extraKeyStatus,
+        customKeyStatus,
+        connectionOverrides,
+      }),
+    [resolvedSettings, apiStatus, extraKeyStatus, customKeyStatus, connectionOverrides],
+  );
+
+  const coreApiStatuses = useMemo(
+    () => allApiStatuses.filter((item) => item.kind === 'core'),
+    [allApiStatuses],
+  );
+  const extraApiStatuses = useMemo(
+    () => allApiStatuses.filter((item) => item.kind === 'extra'),
+    [allApiStatuses],
+  );
+  const customApiStatuses = useMemo(
+    () => allApiStatuses.filter((item) => item.kind === 'custom'),
+    [allApiStatuses],
+  );
+
+  const extraSummary = useMemo(
+    () => summarizeTopBarApiGroup(allApiStatuses, 'extra'),
+    [allApiStatuses],
+  );
+  const customSummary = useMemo(
+    () => summarizeTopBarApiGroup(allApiStatuses, 'custom'),
+    [allApiStatuses],
+  );
 
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const apiStatusContainerRef = useRef<HTMLDivElement | null>(null);
   const onSearchFocusRef = useRef(onSearchFocus);
   onSearchFocusRef.current = onSearchFocus;
   const lastHandledFocusNonceRef = useRef(searchFocusNonce);
@@ -139,6 +244,7 @@ export function TopBar({
 
   useEffect(() => {
     setSearchOpen(false);
+    setApiPopoverOpen(false);
     if (document.activeElement === searchInputRef.current) {
       searchInputRef.current?.blur();
     }
@@ -161,11 +267,18 @@ export function TopBar({
       ) {
         setSearchOpen(false);
       }
+      if (
+        apiStatusContainerRef.current &&
+        !apiStatusContainerRef.current.contains(event.target as Node)
+      ) {
+        setApiPopoverOpen(false);
+      }
     }
 
     function handleEscapeClose(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         setSearchOpen(false);
+        setApiPopoverOpen(false);
       }
     }
 
@@ -176,6 +289,23 @@ export function TopBar({
       document.removeEventListener('keydown', handleEscapeClose);
     };
   }, []);
+
+  async function handleQuickTestProvider(providerId: string) {
+    if (!onTestProvider || testingProviderId) return;
+    setTestingProviderId(providerId);
+    try {
+      const outcome = await onTestProvider(providerId);
+      setTestMessages((prev) => ({
+        ...prev,
+        [providerId]: {
+          ok: outcome.ok,
+          text: outcome.message || (outcome.ok ? 'Reachable' : 'Check failed'),
+        },
+      }));
+    } finally {
+      setTestingProviderId(null);
+    }
+  }
 
   function handleSelectEntry(entry: GlobalSearchEntry) {
     setSearchOpen(false);
@@ -217,21 +347,21 @@ export function TopBar({
 
   return (
     <header className="relative z-40 md:sticky md:top-0 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/90 backdrop-blur transition-colors">
-      <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-y-2 gap-x-2 px-3 py-2.5 sm:px-4 md:flex-nowrap md:gap-3 xl:gap-5 md:px-4 xl:px-6 md:py-3">
+      <div className="mx-auto flex max-w-[1360px] flex-wrap items-center justify-between gap-y-2 gap-x-2 px-3 py-2.5 sm:px-4 md:flex-nowrap md:gap-2 xl:gap-2.5 md:px-4 xl:px-5 md:py-3">
         <a
           href="#investigate"
           onClick={(e) => {
             e.preventDefault();
             onSelectTab('investigate');
           }}
-          className="text-lg font-bold tracking-tight text-slate-950 dark:text-slate-50 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-red-600"
+          className="order-1 md:order-none text-lg font-bold tracking-tight text-slate-950 dark:text-slate-50 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-red-600"
         >
           SoTI
         </a>
 
         <nav
           aria-label="Primary"
-          className="order-3 flex w-full items-center justify-between gap-2 border-t border-slate-100 dark:border-slate-800 pt-2 md:order-none md:w-auto md:justify-start md:gap-3 xl:gap-5 md:border-t-0 md:pt-0"
+          className="order-4 flex w-full items-center justify-between gap-1.5 border-t border-slate-100 dark:border-slate-800 pt-2 md:order-none md:w-auto md:justify-start md:gap-2 xl:gap-3 md:border-t-0 md:pt-0"
         >
           {NAV_ITEMS.map((item) => {
             const isActive = activeTab === item.id;
@@ -240,7 +370,7 @@ export function TopBar({
                 key={item.id}
                 type="button"
                 onClick={() => onSelectTab(item.id)}
-                className={`relative py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer xl:text-sm focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-red-600 ${
+                className={`relative py-1.5 text-xs lg:text-[13px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-red-600 ${
                   isActive
                     ? 'text-slate-950 dark:text-slate-50 after:absolute after:inset-x-0 after:-bottom-[9px] md:after:-bottom-[13px] after:h-0.5 after:bg-red-600'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
@@ -254,7 +384,7 @@ export function TopBar({
 
         <div
           ref={searchContainerRef}
-          className="order-2 relative w-full md:order-none md:w-40 lg:w-44 xl:w-60 shrink-0"
+          className="order-2 relative w-full md:order-none md:w-32 lg:w-36 xl:w-40 shrink-0"
         >
           <div className="relative flex items-center">
             <Search
@@ -282,8 +412,8 @@ export function TopBar({
                 if (!searchOpen) setSearchOpen(true);
               }}
               onKeyDown={handleSearchKeyDown}
-              placeholder="Search IOCs, reports..."
-              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900 py-1.5 pl-8 pr-8 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 transition-colors focus:border-red-600 focus:bg-white dark:focus:bg-slate-950 focus:outline-none"
+              placeholder="Search IOCs..."
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900 py-1.5 pl-8 pr-7 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 transition-colors focus:border-red-600 focus:bg-white dark:focus:bg-slate-950 focus:outline-none"
             />
             {searchQuery ? (
               <button
@@ -408,42 +538,281 @@ export function TopBar({
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => onSelectTab('cli')}
-            aria-label={`API connection status: ${API_DOT_ITEMS.map(
-              (item) => `${item.fullLabel} ${apiStatus[item.id] ? 'valid' : 'invalid'}`,
-            ).join(', ')}. Open API settings`}
-            className="flex items-center gap-1.5 sm:gap-2.5 py-1 text-[11px] font-medium whitespace-nowrap shrink-0 cursor-pointer rounded focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-red-600"
-          >
-            {API_DOT_ITEMS.map((item) => {
-              const isValid = apiStatus[item.id];
-              return (
-                <span
-                  key={item.id}
-                  data-testid={`api-status-dot-${item.id}`}
-                  data-status={isValid ? 'valid' : 'invalid'}
-                  title={`${item.fullLabel}: ${isValid ? 'Valid' : 'Invalid'}`}
-                  className={`inline-flex items-center gap-1 whitespace-nowrap ${
-                    isValid ? 'text-slate-700 dark:text-slate-300' : 'text-red-700 dark:text-red-400'
-                  }`}
-                >
+        <div className="order-3 w-full md:order-none md:w-auto flex items-center gap-1.5 sm:gap-2 shrink-0 min-w-0">
+          <div ref={apiStatusContainerRef} className="relative w-full md:w-auto" data-testid="topbar-api-status-control">
+            <button
+              type="button"
+              data-testid="topbar-api-status-trigger"
+              aria-expanded={apiPopoverOpen}
+              aria-haspopup="dialog"
+              onClick={() => setApiPopoverOpen((prev) => !prev)}
+              aria-label={`API connection status: ${allApiStatuses
+                .map((item) => `${item.fullLabel} ${item.statusLabel}`)
+                .join(', ')}. Inspect or configure APIs`}
+              className={`flex w-full md:w-auto items-center justify-between md:justify-start gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 ${
+                apiPopoverOpen
+                  ? 'border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-800'
+                  : 'border-slate-200/80 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/70 hover:bg-slate-100/80 dark:hover:bg-slate-800/80'
+              }`}
+            >
+              {/* Core Providers: VT, Abuse, OTX */}
+              <span className="inline-flex items-center gap-1.5" data-testid="api-status-group-core">
+                {coreApiStatuses.map((item) => (
                   <span
-                    aria-hidden="true"
-                    className={`h-2 w-2 rounded-full shrink-0 ${
-                      isValid ? 'bg-emerald-500' : 'bg-red-600 dark:bg-red-500'
-                    }`}
-                  />
-                  <span className="hidden 2xl:inline">{item.fullLabel}</span>
-                  <span className="2xl:hidden">{item.shortLabel}</span>
-                </span>
-              );
-            })}
-          </button>
+                    key={item.id}
+                    data-testid={`api-status-dot-${item.id}`}
+                    data-status={item.status}
+                    data-api-kind="core"
+                    title={`${item.fullLabel}: ${item.statusLabel}`}
+                    className={`inline-flex items-center gap-1 whitespace-nowrap ${getProviderTextClass(item.status)}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-2 w-2 rounded-full shrink-0 ${getProviderDotClass(item)}`}
+                    />
+                    <span>{item.shortLabel}</span>
+                  </span>
+                ))}
+              </span>
 
+              <span className="h-3 w-px bg-slate-200 dark:bg-slate-700 shrink-0" aria-hidden="true" />
+
+              {/* Other Extended APIs: Shodan, ThreatFox, urlscan.io */}
+              <span
+                className="inline-flex items-center gap-1 sm:gap-1.5"
+                data-testid="api-status-group-extra"
+                title={`Other APIs: ${extraApiStatuses.map((e) => `${e.fullLabel} (${e.statusLabel})`).join(' · ')}`}
+              >
+                <span className="xl:hidden text-[10px] text-slate-500 dark:text-slate-400">
+                  Other
+                </span>
+                {extraApiStatuses.map((item) => (
+                  <span
+                    key={item.id}
+                    data-testid={`api-status-dot-${item.id}`}
+                    data-status={item.status}
+                    data-api-kind="extra"
+                    title={`${item.fullLabel}: ${item.statusLabel}`}
+                    className={`inline-flex items-center gap-1 whitespace-nowrap ${getProviderTextClass(item.status)}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-2 w-2 rounded-full shrink-0 ${getProviderDotClass(item)}`}
+                    />
+                    <span className="hidden xl:inline">{item.shortLabel}</span>
+                  </span>
+                ))}
+              </span>
+
+              <span className="h-3 w-px bg-slate-200 dark:bg-slate-700 shrink-0" aria-hidden="true" />
+
+              {/* Custom Threat Intel APIs */}
+              <span
+                className="inline-flex items-center gap-1 sm:gap-1.5"
+                data-testid="api-status-group-custom"
+              >
+                {customApiStatuses.length === 0 ? (
+                  <span
+                    data-testid="api-status-dot-custom"
+                    data-status="empty"
+                    data-api-kind="custom"
+                    title="Custom APIs: None registered (add in CLI & APIs)"
+                    className="inline-flex items-center gap-1 whitespace-nowrap text-slate-500 dark:text-slate-400"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="h-2 w-2 rounded-full shrink-0 bg-slate-300 dark:bg-slate-600"
+                    />
+                    <span className="hidden sm:inline">Custom</span>
+                    <span className="font-mono text-[10px] tabular-nums">(0)</span>
+                  </span>
+                ) : customApiStatuses.length === 1 ? (
+                  <span
+                    data-testid={`api-status-dot-${customApiStatuses[0].id}`}
+                    data-status={customApiStatuses[0].status}
+                    data-api-kind="custom"
+                    title={`Custom: ${customApiStatuses[0].fullLabel} (${customApiStatuses[0].statusLabel})`}
+                    className={`inline-flex items-center gap-1 whitespace-nowrap ${getProviderTextClass(customApiStatuses[0].status)}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`h-2 w-2 rounded-full shrink-0 ${getProviderDotClass(customApiStatuses[0])}`}
+                    />
+                    <span className="max-w-[74px] truncate">{customApiStatuses[0].shortLabel}</span>
+                  </span>
+                ) : (
+                  <>
+                    <span className="inline-flex items-center gap-1">
+                      {customApiStatuses.slice(0, 3).map((cp) => (
+                        <span
+                          key={cp.id}
+                          data-testid={`api-status-dot-${cp.id}`}
+                          data-status={cp.status}
+                          data-api-kind="custom"
+                          title={`Custom: ${cp.fullLabel} (${cp.statusLabel})`}
+                          className={`inline-flex items-center whitespace-nowrap ${getProviderTextClass(cp.status)}`}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`h-2 w-2 rounded-full shrink-0 ${getProviderDotClass(cp)}`}
+                          />
+                        </span>
+                      ))}
+                    </span>
+                    <span
+                      data-testid="api-status-custom-count"
+                      className="text-[11px] font-medium text-slate-600 dark:text-slate-300 tabular-nums"
+                      title={`${customApiStatuses.length} custom APIs registered`}
+                    >
+                      Custom ({customApiStatuses.length})
+                    </span>
+                  </>
+                )}
+              </span>
+
+              <ChevronDown
+                className={`h-3 w-3 shrink-0 text-slate-400 transition-transform ${
+                  apiPopoverOpen ? 'rotate-180' : ''
+                }`}
+                aria-hidden="true"
+              />
+            </button>
+
+            {apiPopoverOpen && (
+              <div
+                role="dialog"
+                aria-label="Threat intelligence API connection statuses"
+                data-testid="topbar-api-status-popover"
+                className="fixed left-3 right-3 top-24 sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-2 sm:w-[400px] z-50 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden"
+              >
+                <div className="flex items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 px-4 py-2.5">
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-950 dark:text-slate-50">
+                      Threat Intelligence API Status
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Core ({coreApiStatuses.filter((i) => i.status === 'connected').length}/{coreApiStatuses.length}) · Other ({extraSummary.connectedCount}/{extraSummary.total}) · Custom ({customSummary.connectedCount}/{customSummary.total})
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Close API status popover"
+                    onClick={() => setApiPopoverOpen(false)}
+                    className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+
+                <div className="max-h-[min(520px,70vh)] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                  {(
+                    [
+                      { key: 'core', title: 'Core APIs', items: coreApiStatuses },
+                      { key: 'extra', title: 'Other Threat Intel APIs', items: extraApiStatuses },
+                      { key: 'custom', title: 'Custom Threat APIs', items: customApiStatuses },
+                    ] as const
+                  ).map((section) => (
+                    <div key={section.key} className="px-4 py-2.5 space-y-2">
+                      <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                        {section.title}
+                      </div>
+
+                      {section.items.length === 0 ? (
+                        <p className="py-1 text-[11px] text-slate-500 dark:text-slate-400">
+                          No custom APIs added yet. Configure custom REST feeds in CLI &amp; APIs.
+                        </p>
+                      ) : (
+                        <ul className="space-y-1.5">
+                          {section.items.map((item) => {
+                            const lastMsg = testMessages[item.id];
+                            const isTesting = testingProviderId === item.id;
+                            return (
+                              <li
+                                key={item.id}
+                                data-testid={`popover-api-row-${item.id}`}
+                                className="flex items-center justify-between gap-2 rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-2.5 py-1.5"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span
+                                      aria-hidden="true"
+                                      className={`h-2 w-2 rounded-full shrink-0 ${getProviderDotClass(item)}`}
+                                    />
+                                    <span className="font-medium text-slate-900 dark:text-slate-100 truncate">
+                                      {item.fullLabel}
+                                    </span>
+                                    <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 shrink-0">
+                                      {item.support}
+                                    </span>
+                                  </div>
+                                  <div className="mt-0.5 flex items-center gap-2 text-[10px]">
+                                    <span className={`font-semibold ${getStatusBadgeTextClass(item)}`}>
+                                      {item.statusLabel}
+                                    </span>
+                                    {lastMsg && (
+                                      <span
+                                        className={`truncate ${
+                                          lastMsg.ok
+                                            ? 'text-emerald-700 dark:text-emerald-400'
+                                            : 'text-red-700 dark:text-red-400'
+                                        }`}
+                                        title={lastMsg.text}
+                                      >
+                                        · {lastMsg.text}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {onTestProvider && (
+                                  <button
+                                    type="button"
+                                    data-testid={`topbar-test-api-${item.id}`}
+                                    disabled={isTesting || (!item.configured && !item.enabled)}
+                                    onClick={() => handleQuickTestProvider(item.id)}
+                                    className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-[10px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                                  >
+                                    <Activity
+                                      className={`h-2.5 w-2.5 ${isTesting ? 'animate-pulse text-red-600' : ''}`}
+                                      aria-hidden="true"
+                                    />
+                                    <span>{isTesting ? 'Testing' : 'Test'}</span>
+                                  </button>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 px-4 py-2.5">
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Live keys persisted in server config
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="topbar-open-cli-apis-btn"
+                    onClick={() => {
+                      setApiPopoverOpen(false);
+                      onSelectTab('cli');
+                    }}
+                    className="inline-flex items-center gap-1 rounded-md bg-slate-900 dark:bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 cursor-pointer"
+                  >
+                    <SlidersHorizontal className="h-3 w-3" aria-hidden="true" />
+                    <span>Configure APIs</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="order-1 md:order-none flex items-center gap-1 sm:gap-1.5 shrink-0">
           <span
-            className="hidden sm:block h-4 w-px bg-slate-200 dark:bg-slate-800 shrink-0"
+            className="hidden md:block h-4 w-px bg-slate-200 dark:bg-slate-800 shrink-0"
             aria-hidden="true"
           />
 
@@ -484,6 +853,35 @@ export function TopBar({
             )}
           </button>
 
+          {onToggleQuickNotes && (
+            <button
+              type="button"
+              onClick={onToggleQuickNotes}
+              data-testid="topbar-quick-notes-toggle"
+              aria-expanded={quickNotesOpen}
+              aria-label="Toggle Quick Notes sidebar panel"
+              title="Open Quick Notes persistent scratchpad"
+              className={`relative inline-flex items-center justify-center rounded-lg border p-1.5 sm:px-2 sm:py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200 ${
+                quickNotesOpen
+                  ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300'
+                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-950 dark:hover:text-white'
+              }`}
+            >
+              <StickyNote
+                className={`h-3.5 w-3.5 ${
+                  quickNotesHasContent ? 'text-amber-600 dark:text-amber-400' : ''
+                }`}
+                aria-hidden="true"
+              />
+              {quickNotesHasContent && (
+                <span
+                  aria-hidden="true"
+                  className="ml-1 h-1.5 w-1.5 rounded-full bg-amber-500"
+                />
+              )}
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onToggleTheme}
@@ -508,7 +906,7 @@ export function TopBar({
               onClick={onOpenShortcuts}
               aria-label="Open keyboard shortcuts guide"
               title="Keyboard shortcuts (?)"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-1.5 sm:px-2 sm:py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-1.5 sm:px-2 sm:py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
             >
               <Keyboard className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="sr-only">Shortcuts</span>

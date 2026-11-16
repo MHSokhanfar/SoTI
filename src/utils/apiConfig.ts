@@ -543,3 +543,179 @@ export function maskSecretHint(secret: string | null | undefined): string {
   if (val.length <= 6) return '••••••';
   return `••••${val.slice(-4)}`;
 }
+
+export type TopBarProviderKind = 'core' | 'extra' | 'custom';
+export type TopBarProviderStatusState = 'connected' | 'unconfigured' | 'disabled' | 'failed';
+
+export interface TopBarProviderStatusItem {
+  id: string;
+  fullLabel: string;
+  shortLabel: string;
+  kind: TopBarProviderKind;
+  enabled: boolean;
+  configured: boolean;
+  overrideOk?: boolean;
+  envVarName: string;
+  support: string;
+  status: TopBarProviderStatusState;
+  statusLabel: string;
+}
+
+const CORE_TOPBAR_META: {
+  id: SourceId;
+  fullLabel: string;
+  shortLabel: string;
+  envVar: string;
+  support: string;
+}[] = [
+  { id: 'virustotal', fullLabel: 'VirusTotal', shortLabel: 'VT', envVar: 'VT_API_KEY', support: 'IP, Domain, Hash' },
+  { id: 'abuseipdb', fullLabel: 'AbuseIPDB', shortLabel: 'Abuse', envVar: 'ABUSEIPDB_API_KEY', support: 'IP only' },
+  { id: 'alienvault', fullLabel: 'AlienVault OTX', shortLabel: 'OTX', envVar: 'OTX_API_KEY', support: 'IP, Domain, Hash' },
+];
+
+const EXTRA_SHORT_LABELS: Record<BuiltinExtraSourceId, string> = {
+  shodan: 'Shodan',
+  threatfox: 'TFox',
+  urlscan: 'URL',
+};
+
+function resolveProviderStatusState(params: {
+  enabled: boolean;
+  configured: boolean;
+  overrideOk?: boolean;
+}): { status: TopBarProviderStatusState; statusLabel: string } {
+  if (params.overrideOk === true) {
+    return { status: 'connected', statusLabel: 'Verified' };
+  }
+  if (params.overrideOk === false) {
+    return { status: 'failed', statusLabel: 'Check Failed' };
+  }
+  if (!params.enabled) {
+    return {
+      status: 'disabled',
+      statusLabel: params.configured ? 'Disabled (Key Ready)' : 'Disabled',
+    };
+  }
+  if (params.configured) {
+    return { status: 'connected', statusLabel: 'Configured' };
+  }
+  return { status: 'unconfigured', statusLabel: 'Key Missing' };
+}
+
+function compactProviderLabel(name: string, maxLen: number = 10): string {
+  const clean = name.trim();
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, maxLen - 1)}…`;
+}
+
+export function buildTopBarApiStatuses(params: {
+  apiSettings: ApiSettings;
+  keyStatus: ApiKeyStatus;
+  extraKeyStatus?: Partial<Record<BuiltinExtraSourceId, boolean>>;
+  customKeyStatus?: Record<string, boolean>;
+  connectionOverrides?: Record<string, boolean | undefined>;
+}): TopBarProviderStatusItem[] {
+  const {
+    apiSettings,
+    keyStatus,
+    extraKeyStatus = {},
+    customKeyStatus = {},
+    connectionOverrides = {},
+  } = params;
+
+  const items: TopBarProviderStatusItem[] = [];
+
+  for (const core of CORE_TOPBAR_META) {
+    const enabled = Boolean(apiSettings.providers?.[core.id]?.enabled ?? true);
+    const configured = Boolean(keyStatus[core.id]);
+    const overrideOk = connectionOverrides[core.id];
+    const resolved = resolveProviderStatusState({ enabled, configured, overrideOk });
+    items.push({
+      id: core.id,
+      fullLabel: core.fullLabel,
+      shortLabel: core.shortLabel,
+      kind: 'core',
+      enabled,
+      configured,
+      overrideOk,
+      envVarName: core.envVar,
+      support: core.support,
+      ...resolved,
+    });
+  }
+
+  for (const extraId of BUILTIN_EXTRA_IDS) {
+    const meta = EXTRA_PROVIDER_META[extraId];
+    const enabled = Boolean(apiSettings.extraProviders?.[extraId]?.enabled ?? false);
+    const configured = Boolean(extraKeyStatus[extraId]);
+    const overrideOk = connectionOverrides[extraId];
+    const resolved = resolveProviderStatusState({ enabled, configured, overrideOk });
+    items.push({
+      id: extraId,
+      fullLabel: meta.name,
+      shortLabel: EXTRA_SHORT_LABELS[extraId],
+      kind: 'extra',
+      enabled,
+      configured,
+      overrideOk,
+      envVarName: meta.envVar,
+      support: meta.support,
+      ...resolved,
+    });
+  }
+
+  for (const cp of apiSettings.customProviders || []) {
+    const configured = Boolean(customKeyStatus[cp.id]);
+    const overrideOk = connectionOverrides[cp.id];
+    const resolved = resolveProviderStatusState({
+      enabled: cp.enabled,
+      configured,
+      overrideOk,
+    });
+    items.push({
+      id: cp.id,
+      fullLabel: cp.name,
+      shortLabel: compactProviderLabel(cp.name),
+      kind: 'custom',
+      enabled: cp.enabled,
+      configured,
+      overrideOk,
+      envVarName: cp.envVarName,
+      support: cp.supportedTypes.map((t) => t.toUpperCase()).join(', '),
+      ...resolved,
+    });
+  }
+
+  return items;
+}
+
+export function summarizeTopBarApiGroup(
+  items: readonly TopBarProviderStatusItem[],
+  kind: TopBarProviderKind,
+): {
+  total: number;
+  enabledCount: number;
+  connectedCount: number;
+  issueCount: number;
+  disabledCount: number;
+} {
+  const scoped = items.filter((item) => item.kind === kind);
+  let enabledCount = 0;
+  let connectedCount = 0;
+  let issueCount = 0;
+  let disabledCount = 0;
+  for (const item of scoped) {
+    if (item.enabled) enabledCount += 1;
+    if (item.status === 'connected') connectedCount += 1;
+    else if (item.status === 'unconfigured' || item.status === 'failed') issueCount += 1;
+    else disabledCount += 1;
+  }
+  return {
+    total: scoped.length,
+    enabledCount,
+    connectedCount,
+    issueCount,
+    disabledCount,
+  };
+}
+

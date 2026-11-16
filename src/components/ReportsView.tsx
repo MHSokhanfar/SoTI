@@ -67,6 +67,7 @@ import type { ThemeMode } from '../utils/theme';
 import { IocRegionHeatmap } from './IocRegionHeatmap';
 import { LiveActivityFeed } from './LiveActivityFeed';
 import { RelationshipGraphWidget } from './RelationshipGraphWidget';
+import { RiskScoreHeatmap } from './RiskScoreHeatmap';
 import { ThreatLandscapeWidget } from './ThreatLandscapeWidget';
 
 type ChartScope = 'malicious_clean' | 'all_verdicts';
@@ -1033,6 +1034,24 @@ export function ReportsView({
               selectReport(reportName);
             }}
           />
+
+          {currentResults.length > 0 && (
+            <RiskScoreHeatmap
+              reports={reports}
+              allRunRows={allRunRows}
+              currentResults={currentResults}
+              selectedRunName={selectedName}
+              theme={theme}
+              loading={loadingHeatmapRows}
+              onSelectReport={(reportName) => {
+                selectReport(reportName);
+              }}
+              onInspectIndicator={(indicator) => {
+                setVerdictFilter('All');
+                setSearchQuery(indicator);
+              }}
+            />
+          )}
         </div>
       ) : (
         <>
@@ -1516,6 +1535,22 @@ export function ReportsView({
               </div>
             </section>
           </div>
+
+          <RiskScoreHeatmap
+            reports={reports}
+            allRunRows={allRunRows}
+            currentResults={currentResults}
+            selectedRunName={selectedName}
+            theme={theme}
+            loading={loadingHeatmapRows}
+            onSelectReport={(reportName) => {
+              selectReport(reportName);
+            }}
+            onInspectIndicator={(indicator) => {
+              setVerdictFilter('All');
+              setSearchQuery(indicator);
+            }}
+          />
 
           <RelationshipGraphWidget
             allRunRows={allRunRows}

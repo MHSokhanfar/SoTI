@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCustomEndpointUrl,
   buildHeartbeatEndpoint,
+  buildTopBarApiStatuses,
   cloneDefaultApiSettings,
   DEFAULT_API_SETTINGS,
   evaluateHeartbeatResponse,
@@ -12,6 +13,7 @@ import {
   maskSecretHint,
   mergeConfigAndConnectionStatus,
   resolveSelectedSources,
+  summarizeTopBarApiGroup,
   validateAndNormalizeApiSettings,
   validateCustomThreatProvider,
   validateSingleProviderUrl,
@@ -163,6 +165,67 @@ test('isEditableThreatIntelEnvVar allows provider keys, blocks system/Gemini var
   assert.equal(maskSecretHint('short'), '••••••');
   assert.equal(maskSecretHint(''), '');
 });
+
+test('buildTopBarApiStatuses and summarizeTopBarApiGroup track core, extra (other), and custom providers', () => {
+  const settings = cloneDefaultApiSettings();
+  settings.extraProviders.shodan.enabled = true;
+  settings.extraProviders.threatfox.enabled = true;
+  settings.customProviders = [
+    {
+      id: 'custom-misp',
+      name: 'MISP ThreatFeed',
+      enabled: true,
+      endpointTemplate: 'https://misp.local/lookup/{indicator}',
+      authHeader: 'Authorization',
+      authPrefix: 'Bearer',
+      envVarName: 'MISP_API_KEY',
+      supportedTypes: ['ip', 'domain'],
+      dailyQuotaLimit: 500,
+    },
+  ];
+
+  const items = buildTopBarApiStatuses({
+    apiSettings: settings,
+    keyStatus: { virustotal: true, abuseipdb: false, alienvault: true },
+    extraKeyStatus: { shodan: true, threatfox: false, urlscan: false },
+    customKeyStatus: { 'custom-misp': true },
+    connectionOverrides: { threatfox: false, 'custom-misp': true },
+  });
+
+  const shodan = items.find((i) => i.id === 'shodan')!;
+  assert.equal(shodan.kind, 'extra');
+  assert.equal(shodan.status, 'connected');
+
+  const threatfox = items.find((i) => i.id === 'threatfox')!;
+  assert.equal(threatfox.status, 'failed');
+
+  const urlscan = items.find((i) => i.id === 'urlscan')!;
+  assert.equal(urlscan.status, 'disabled');
+
+  const misp = items.find((i) => i.id === 'custom-misp')!;
+  assert.equal(misp.kind, 'custom');
+  assert.equal(misp.status, 'connected');
+  assert.equal(misp.statusLabel, 'Verified');
+
+  const extraSummary = summarizeTopBarApiGroup(items, 'extra');
+  assert.deepEqual(extraSummary, {
+    total: 3,
+    enabledCount: 2,
+    connectedCount: 1,
+    issueCount: 1,
+    disabledCount: 1,
+  });
+
+  const customSummary = summarizeTopBarApiGroup(items, 'custom');
+  assert.deepEqual(customSummary, {
+    total: 1,
+    enabledCount: 1,
+    connectedCount: 1,
+    issueCount: 0,
+    disabledCount: 0,
+  });
+});
+
 
 
 

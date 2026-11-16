@@ -154,13 +154,16 @@ Then open **[http://localhost:3000](http://localhost:3000)**.
      - Toggle the **Live Mode** switch ON whenever you have active indicators to continuously monitor for score or verdict changes in the background.
      - Choose a polling cadence (`15s`, `30s`, `60s`, or `5m`), watch the real-time **`Next refresh in Xs (HH:MM:SS UTC)`** countdown and last-refresh timestamp in the status strip, or click **Refresh Now** for an immediate poll without creating duplicate history cards or redundant CSV reports.
    - **Providers, Risk Threshold & Inspection**: Select active providers (**VirusTotal**, **AbuseIPDB**, **AlienVault OTX**, **ThreatFox**, **URLScan**, plus enabled custom sources), dial the **Risk Threshold** slider (`0–100` with `All`, `25+`, `50+`, `75+` presets) to hide low-impact IOCs from both the **Summary Matrix** and **Unified Batch** tables, inspect the **Confidence Score Legend**, per-row **Historical Confidence Trend Mini-Sparklines** (highlighting rising `Emerging` threat signals across past CSV reports, history, and Live Mode polls), D3 **Attack Infrastructure Network Graph**, and **Chronological IOC Activity Timeline** (`Creation Date`, `Domain Registered`, `First Seen`, `Last Seen`, `Last Reported`, `Last Analysis`).
-   - **Interactive Column Sorting, Last Seen, Quick Copy, Tagging, Auto-Saved Notes & Export Dropdown**: Click any sortable column header (**`Indicator`**, **`Type`**, **`Source`**, **`Verdict`**, **`Risk Score`**, **`Last Seen`**, **`Score`**, or **`Hits`**) in either the **Summary Matrix** or **Unified Batch** table to toggle ascending/descending order (`aria-sort` + directional indicators) for rapid threat prioritization. Click the inline **Copy to Clipboard** icon next to any indicator value in every row to copy the raw IOC (`1.2.3.4`, `evil.com`, hash) for external security tools (or use **Copy** for the formatted provider summary). Click **`+ Tag`** on any row or IOC card to assign presets (`Phishing`, `Malware`, `Critical`, `C2`, `Ransomware`, `False Positive`) or custom labels, filter results by tag and verdict, and record **Researcher Notes**—which **auto-save periodically to `localStorage`** (with debounced writes, a 3-second periodic timer, and `beforeunload` flush, showing `"Auto-saved to local storage · HH:MM:SS UTC"`). Open the **`Export Data`** dropdown menu to export the currently sorted & filtered table view to **`Export CSV (.csv)`**, **`Export JSON (.json)`**, or **`Export TXT Report (.txt)`**, click **`Print / PDF`** for a clean print-formatted PDF layout via `@media print` rules in `index.css`, or export the complete workbench bundle via **Export Full Session**.
-   - **Tabbed Sidebar (`Recent` & Persistent `Watchlist`)**:
-     - **Recent**: Browse local investigation history with right-click **Pin / Rename / Delete**, tag filtering, and D3 heatmap geographic region filtering.
-     - **Watchlist**: Monitor specific IOCs persistently across browser reloads—add indicators manually or toggle **`Watch`** / **`Watching`** on any results row or IOC card, run **Check Updates** on demand (or let Live Mode / enrichment polls re-evaluate monitored IOCs), view status/score transition deltas (`Verdict Clean -> Malicious · Score 0 -> 79`), and clear unread counters from the red **notification badge** on the Watchlist tab.
+   - **Interactive Column Sorting, Last Seen, Quick Copy, Auto-Saved Notes, Session Snapshot & Export Dropdown**: Click any sortable column header (**`Indicator`**, **`Type`**, **`Source`**, **`Verdict`**, **`Risk Score`**, **`Last Seen`**, **`Score`**, or **`Hits`**) in either the **Summary Matrix** or **Unified Batch** table to toggle ascending/descending order (`aria-sort` + directional indicators) for rapid threat prioritization. Click the inline **Copy to Clipboard** icon next to any indicator value in every row to copy the raw IOC (`1.2.3.4`, `evil.com`, hash) for external security tools (or use **Copy** for the formatted provider summary). Click **`+ Tag`** on any row or IOC card to assign presets (`Phishing`, `Malware`, `Critical`, `C2`, `Ransomware`, `False Positive`) or custom labels, filter results by tag and verdict, and record **Researcher Notes**—which **auto-save periodically to `localStorage`** (with debounced writes, a 3-second periodic timer, and `beforeunload` flush, showing `"Auto-saved to local storage · HH:MM:SS UTC"`). Click **`Session Snapshot`** in the results toolbar to serialize your active investigation results, input tokens, provider selections, sort/filter state, tags, and Researcher Notes into a shareable browser-based link (`#soti_snapshot=...`), allowing collaborators or returning sessions to pick up immediately where you left off. Open the **`Export Data`** dropdown menu to export the currently sorted & filtered table view to **`Export CSV (.csv)`**, **`Export JSON (.json)`**, or **`Export TXT Report (.txt)`**, click **`Print / PDF`** for a clean print-formatted PDF layout via `@media print` rules in `index.css`, or export the complete workbench bundle via **Export Full Session**.
+   - **TopBar Multi-Provider API Status & Interactive Popover**: At a glance in the global header bar, inspect real-time status dots for **Core** providers (`VT`, `Abuse`, `OTX`), **Other Extended** providers (`Shodan`, `TFox`, `URL`), and user-defined **Custom Threat Intel APIs**. Click the status pill to expand the **Threat Intelligence API Status** popover, run inline per-provider **`Test`** connection checks, or jump directly to **CLI & APIs**.
+   - **Tabbed Sidebar (`Recent`, Persistent `Watchlist`, & `Quick Notes`)**:
+     - **Recent**: Browse local investigation history with right-click **Pin / Rename / Delete**, tag filtering, D3 heatmap geographic region filtering, one-click **`Export`** (downloading investigation IDs, UTC creation timestamps, modes, and verdict counts as `soti_investigation_history_*.json`), and a safeguarded **`Clear History`** confirmation dialog with **`Export JSON First`** protection.
+     - **Watchlist**: Stored in top-level application state and synced to `localStorage` across sessions and tab switches—toggle **`Watch`** / **`Watching`** directly on any IP address, domain, or file hash row or IOC card in the results view, add indicators manually, run **Check Updates** on demand, view status/score transition deltas (`Verdict Clean -> Malicious · Score 0 -> 79`), and clear unread counters from the red **notification badge** on the Watchlist tab.
+     - **Quick Notes**: Collapsible sticky scratchpad directly beneath **Recent / Watchlist** (and accessible from **any** workspace tab via the top-bar **`Quick Notes`** slide-over drawer) that immediately persists transient analyst hypotheses, pivot commands, and triage reminders across browser sessions via `localStorage` with live character count, **Copy**, and **Clear** (with **Undo** recovery).
 
 2. **Reports (`Alt+2`)**
-   - Review SOC **Quick Stats** KPIs, the real-time **Live Activity** scrollable feed, verdict distribution charts, **30-day alert trendline**, D3 **Relationship Graph**, D3 **Real-Time Threat Landscape World Map**, and interactive D3 **Geographic Region IOC Heatmap**.
+   - Review SOC **Quick Stats** KPIs, the real-time **Live Activity** scrollable feed, verdict distribution charts, **30-day alert trendline**, D3 **Risk Score Heatmap**, D3 **Relationship Graph**, D3 **Real-Time Threat Landscape World Map**, and interactive D3 **Geographic Region IOC Heatmap**.
+   - **Risk Score Heatmap (`RiskScoreHeatmap`)**: D3 matrix directly beneath the historical trend charts visualizing **High (`50–100`)**, **Medium (`25–49`)**, and **Low (`0–24`)** risk score distribution across all processed investigations (`Across Investigations` timeline or aggregated `By Indicator Type` across IPs, Domains, and File Hashes), complete with a 5-column **Overall Posture** KPI strip (`Critical`, `Elevated`, `Moderate`, `Low`) and clickable cells for **Inspect Run** and **Filter Table** drill-down.
    - **Live Activity Scrollable Feed (`LiveActivityFeed`)**: Streams real-time **Threat Alerts** (high-confidence detections and threshold emails), **Investigations** (completed enrichments and saved CSV runs), and **System Events** (`logs/soti.log` telemetry and rate-limit events) over Server-Sent Events (`/api/activity/stream`) into a bounded scrollable feed (`max-h-[300px] overflow-y-auto`). Filter by category tabs (`All Activity`, `Threat Alerts`, `Investigations`, `System Events`), search inline, pause/resume the live stream, or click **Filter IOC** / **Open Run** to pivot immediately.
    - **Dashboard Relationship Graph (`RelationshipGraphWidget`)**: Interactive D3 force-directed network map connecting IPs, shared domains, file hashes, malware families, and ASN infrastructure across **`All Runs & Active`**, **`Selected Run`**, or **`Active Session`**. Toggle **`Shared Links Only`** or click any **`Shared Infrastructure Hubs`** spotlight button (`1.2.3.4`, `evil.com`, `eicar.com`, etc.) to highlight cross-indicator hubs with dashed amber rings and inspect connected entities with **Copy Value** and **Filter Reports** actions.
    - **Real-Time D3 World Map (`ThreatLandscapeWidget`)**: Displays geolocated active IOC origin points overlaid on a Natural Earth projection with optional 30-second **Real-Time Sync** polling; hover any **continental landmass region** or **origin marker** to inspect live threat counts, peak confidence score, and top source countries, or switch scopes (`Active IOCs (Real-Time)`, `All Runs`, `Selected Run`, `Current Investigation`) and confidence thresholds.
@@ -233,6 +236,12 @@ python main.py --remove-schedule <SCHEDULE_ID>
 
 ## 7. Recently Added Features
 
+- **Unified TopBar Core, Other & Custom API Status Bar (`TopBar` & `apiConfig`)**: Live multi-group connection dots directly in the persistent top navigation bar covering **Core** (`VT`, `Abuse`, `OTX`), **Other Extended** (`Shodan`, `TFox`, `URL`), and any registered **Custom Threat Intel APIs** (`GreyNoise`, etc.), plus an interactive popover with categorized status summaries, inline per-provider **`Test`** heartbeat buttons, and direct **Configure APIs** navigation.
+- **Application-State Persistent `Watchlist` & In-Results `Watch`/`Watching` Toggles (`App`, `InvestigateView` & `watchlist`)**: Watchlist state elevated into root application state (`App.tsx`) with `localStorage` persistence (`soti_ioc_watchlist_v1`) so saved IP addresses, domains, and file hashes remain synchronized across tabs and browser reloads, complete with accessible **`Watch`** / **`Watching`** toggle buttons on every **Summary Matrix** row, **Unified Batch** row, and detailed IOC card.
+- **Investigation History `Clear History` Confirmation Dialog & JSON `Export` (`RecentInvestigationsSidebar` & `investigationHistory`)**: Added a dedicated **`Export`** action that downloads saved investigation IDs, ISO/UTC timestamps (`createdAt`, `timestamp`), indicator lists, modes, and verdict summaries as `soti_investigation_history_*.json`, paired with a safeguarded **`Clear History`** modal dialog (with **`Export JSON First`** and **`Cancel`** options) to prevent accidental deletion.
+- **Persistent `Quick Notes` Sidebar Panel & Global Drawer (`QuickNotesSidebarPanel` & `quickNotes`)**: Always-available cross-session analyst scratchpad stored in `localStorage` (`soti_quick_notes_v1`), docked inline inside the **Investigate** sidebar and toggleable as a right-hand slide-over drawer from any workspace tab (**`Quick Notes`** button in the TopBar with an active-content indicator dot). Includes collapse/expand state persistence, live character count, UTC last-saved indicator, one-click **Copy**, and **Clear** with a 6-second **Undo** action.
+- **Shareable Browser-Based `Session Snapshot` Links (`InvestigateView` & `sessionSnapshot`)**: Added a **`Session Snapshot`** button to the **Investigate** results toolbar that synchronously serializes the full investigation state—enriched lookup results, raw input, analysis mode (`Standard`/`Bulk`), provider toggles, verdict filter, Risk Threshold, active column sort order, scoped IOC tags, and **Researcher Notes**—into a self-contained UTF-8 URL fragment (`#soti_snapshot=soti1.<base64url>`). Opening or loading the generated link in any browser automatically switches to **Investigate**, restores the exact session state, and displays a dismissible **Restored Investigation from Session Snapshot** banner without needing external storage.
+- **Dashboard `Risk Score Heatmap` & Security Posture Overview (`RiskScoreHeatmap` & `riskScoreHeatmap`)**: D3 matrix visualization on the **Reports** dashboard displaying **High (`50–100`)**, **Medium (`25–49`)**, and **Low (`0–24`)** risk indicator counts and column percentages across all processed investigations (`Across Investigations` timeline or `By Indicator Type` breakdown across IPs, Domains, and File Hashes), paired with a 5-column **Overall Posture** KPI strip (`Critical`, `Elevated`, `Moderate`, `Low`) and clickable cells for **Inspect Run** and **Filter Table** drill-down.
 - **Interactive Sortable Results Columns & `Last Seen` Telemetry (`InvestigateView` & `resultsTable`)**: Clickable ascending/descending column sorting (`Indicator`, `Risk Score`, `Last Seen`, `Type`, `Source`, `Verdict`, `Score`, and `Hits`) across both the **Summary Matrix** and **Unified Batch** tables with accessible `aria-sort` state, active sort arrow indicators, deterministic N/A-last ranking, and a dedicated **`Last Seen`** UTC observation timestamp column extracted from provider telemetry (`Last Seen`, `Last Reported`, `Last Analysis`, `Updated`).
 - **`Export Data` Multi-Format Dropdown (`CSV`, `JSON`, `TXT Report`)**: Replaced separate export triggers with a unified **`Export Data`** dropdown menu in **InvestigateView** allowing analysts to export the **currently sorted & filtered view** as **`Export CSV (.csv)`**, **`Export JSON (.json)`**, or a human-readable **`Export TXT Report (.txt)`** (`soti_report_*.txt`) complete with active filter metadata, sort order, verdict breakdown, confidence scores, `Last Seen` timestamps, tags, and **Researcher Notes**.
 - **Researcher Notes Periodic Auto-Save (`InvestigateView` & `notesAutoSave`)**: Analyst findings typed into the **Researcher Notes** panel are automatically persisted to `localStorage` (`soti_researcher_notes_autosave_v1` + recent run history sync) via fast debounced writes, a **3-second periodic interval**, and `pagehide` / `beforeunload` flushes—requiring zero manual Save clicks while keeping live `"Auto-saving..."` / `"Auto-saved to local storage · HH:MM:SS UTC"` feedback and cross-reload restoration.
@@ -262,20 +271,45 @@ python main.py --remove-schedule <SCHEDULE_ID>
 
 All screenshots below were captured directly from the running SoTI Web Workbench (`http://localhost:3000`) at desktop viewport resolution (`1440×900`):
 
+### TopBar Multi-Provider API Status & Interactive Popover
+![SoTI TopBar Core, Other, and Custom API Status Popover](docs/screenshots/topbar-api-status-popover.png)
+
+*Persistent header status bar displaying live indicators across **Core** (`VT`, `Abuse`, `OTX`), **Other Extended** (`Shodan`, `TFox`, `URL`), and **Custom** (`GreyNoise`) threat intel feeds, expanding into an interactive popover with inline per-provider **`Test`** connection checks and a **Configure APIs** shortcut.*
+
 ### Investigation Workbench & Input Controls
 ![SoTI Investigation Workbench](docs/screenshots/investigate-workbench.png)
 
 *Main **Investigate** workspace displaying the **Standard / Bulk Input** mode switcher, **Sample Data / Live API** execution controls, **Live Mode** background polling selector, live daily provider quota bars, automatic defanged IOC recovery (`1[.]2[.]3[.]4`, `hxxps://evil[.]com/login`), provider selector strip, **Risk Threshold** slider, and **Recent Investigations** history sidebar.*
 
-### Results Matrix, Risk Threshold Slider, Sparklines & Quick Copy
-![SoTI Results Matrix with Risk Threshold and Copy Actions](docs/screenshots/investigate-results-matrix.png)
+### Results Matrix, Risk Threshold Slider, Quick Copy & Watchlist Toggles
+![SoTI Results Matrix with Risk Threshold, Copy, Watchlist and History Actions](docs/screenshots/investigate-results-matrix.png)
 
-*Enriched **Summary Matrix** with clickable ascending/descending column sorting (**`Indicator`**, **`Type`**, **`Source`**, **`Verdict`**, **`Risk Score`**, **`Last Seen`**, **`Score`**), the **Risk Threshold** confidence filter bar (`0–100` slider and `All`, `25+`, `50+`, `75+` presets), color-coded **Confidence Score Legend**, per-row inline **Copy to Clipboard** buttons beside every indicator value, **Trend** confidence sparklines, **`+ Tag`** / **`Watch`** triage controls, and **`Export Data` (`CSV` / `JSON` / `TXT Report`)**, **`Print / PDF`**, and **`Export Full Session`** controls.*
+*Enriched **Summary Matrix** with clickable ascending/descending column sorting (**`Indicator`**, **`Type`**, **`Source`**, **`Verdict`**, **`Risk Score`**, **`Last Seen`**, **`Score`**), **Risk Threshold** confidence filter bar, per-row inline **Copy to Clipboard** buttons, active **`Watching` / `Watch`** IOC toggles backed by application state (`Watchlist (3)`), **`Recent`** sidebar **`Export`** / **`Clear History`** buttons, **`Session Snapshot`**, **`Export Data` (`CSV` / `JSON` / `TXT Report`)**, **`Print / PDF`**, and **`Export Full Session`** controls.*
+
+### Recent Investigation History Export & Clear Confirmation Dialog
+![SoTI Clear History Confirmation Dialog](docs/screenshots/recent-history-clear-export.png)
+
+*Safeguarded **Clear Investigation History?** modal preventing accidental wipes of saved runs, featuring inline **`Export JSON First`** (to save investigation IDs and timestamps before clearing), **`Cancel`**, and **`Clear History`** actions.*
+
+### Persistent `Quick Notes` Sidebar Panel
+![SoTI Quick Notes Sidebar Panel](docs/screenshots/investigate-quick-notes.png)
+
+*Persistent **Quick Notes** scratchpad docked in the **Investigate** sidebar (and accessible from any tab via the top-bar **Quick Notes** drawer), automatically preserving transient analyst hypotheses in `localStorage` across browser reloads with live character counters, UTC save timestamps, **Copy**, and **Clear / Undo**.*
+
+### Shareable Browser `Session Snapshot` Modal & Restoration
+![SoTI Session Snapshot Link Modal](docs/screenshots/investigate-session-snapshot.png)
+
+*Clicking **`Session Snapshot`** serializes the active investigation results, filters, sort order, tags, and Researcher Notes into a shareable browser-based `#soti_snapshot=...` link that restores the exact session state on open.*
 
 ### Real-Time `Live Activity` Scrollable Feed (`Reports` Dashboard)
 ![SoTI Live Activity Feed](docs/screenshots/dashboard-live-activity.png)
 
 *Real-time **Live Activity** feed mounted beneath the SOC **Quick Stats** KPI cards on the **Reports** dashboard, showing **Live Stream Active** SSE status, alert/run/system-event counters, category filter tabs (`All Activity`, `Threat Alerts`, `Investigations`, `System Events`), inline search, and direct **Filter IOC** / **Open Run** pivots.*
+
+### Dashboard D3 `Risk Score Heatmap` & Security Posture (`Reports` Tab)
+![SoTI Dashboard Risk Score Heatmap](docs/screenshots/dashboard-risk-heatmap.png)
+
+*D3 **Risk Score Heatmap** on the **Reports** dashboard plotting **High (`50–100`)**, **Medium (`25–49`)**, and **Low (`0–24`)** risk indicator counts and percentages across processed investigations (`Across Investigations` / `By Indicator Type`), featuring an **Overall Posture** KPI strip and clickable cells with **Inspect Run** and **Filter Table** drill-down.*
 
 ### Dashboard D3 `Relationship Graph` & Shared Infrastructure Hubs
 ![SoTI D3 Relationship Graph](docs/screenshots/dashboard-relationship-graph.png)
@@ -336,7 +370,7 @@ SoTI/
 │   └── soti.log
 ├── reports/                                # Saved enrichment CSV exports (created at runtime)
 ├── src/                                    # React + TypeScript + Tailwind CSS Web Workbench
-│   ├── App.tsx                             # Root shell, theme, shortcuts, share loader, search
+│   ├── App.tsx                             # Root shell, Watchlist app state, API status wiring, theme, shortcuts, search
 │   ├── index.css                           # Tailwind CSS configuration, design tokens & @media print rules
 │   ├── main.tsx                            # React DOM mount entry point
 │   ├── components/
@@ -345,7 +379,7 @@ SoTI/
 │   │   ├── EmailAlertSettingsPanel.tsx     # Threshold-based SMTP alert rules UI
 │   │   ├── HelpModal.tsx                   # Workbench onboarding & provider setup guide
 │   │   ├── IndicatorFileUpload.tsx         # Local .csv/.txt IOC upload & parser
-│   │   ├── InvestigateView.tsx             # Standard/Bulk Input, Live Mode, auto-saved notes, Print/PDF, exports
+│   │   ├── InvestigateView.tsx             # Standard/Bulk Input, Live Mode, Watch toggles, auto-saved notes, Print/PDF, exports
 │   │   ├── IocEventTimeline.tsx            # Chronological UTC activity timeline component
 │   │   ├── IocNetworkGraph.tsx             # D3 force-directed IOC relationship graph
 │   │   ├── IocRegionHeatmap.tsx            # D3 interactive geographic IOC heatmap & filter
@@ -353,12 +387,14 @@ SoTI/
 │   │   ├── LiveActivityFeed.tsx            # Real-time SSE scrollable alerts & telemetry feed
 │   │   ├── LogsView.tsx                    # Real-time audit & failover log viewer
 │   │   ├── NotificationCenter.tsx          # Quota warning & workspace alert drawer
-│   │   ├── RecentInvestigationsSidebar.tsx # Context-menu history, pin/rename/tag/region filter
+│   │   ├── QuickNotesSidebarPanel.tsx      # Persistent localStorage Quick Notes panel & slide-over drawer
+│   │   ├── RecentInvestigationsSidebar.tsx # History sidebar, JSON Export, Clear History dialog, pin/rename/tag/region filter
 │   │   ├── RelationshipGraphWidget.tsx     # Dashboard D3 force-directed IOC relationship graph
-│   │   ├── ReportsView.tsx                 # KPIs, charts, Live Activity, Relationship Graph, AI summary & Share modal
+│   │   ├── ReportsView.tsx                 # KPIs, charts, Live Activity, Risk Score Heatmap, Relationship Graph & Share modal
+│   │   ├── RiskScoreHeatmap.tsx            # D3 High/Medium/Low risk score heatmap across processed investigations
 │   │   ├── ScheduledView.tsx               # Recurring schedule manager UI
 │   │   ├── ThreatLandscapeWidget.tsx       # Real-time D3 world map, region hover & threat clusters
-│   │   ├── TopBar.tsx                      # Navigation tabs, global search, provider status, theme
+│   │   ├── TopBar.tsx                      # Navigation tabs, Core/Other/Custom API status bar & popover, search, theme
 │   │   └── WatchlistSidebarTab.tsx         # Persistent IOC watchlist monitor & update badge UI
 │   └── utils/                              # Pure TypeScript business logic & node:test suites
 │       ├── apiConfig.ts / .test.ts         # Threat-intel key validation, masking & provider rules
@@ -380,15 +416,18 @@ SoTI/
 │       ├── livePolling.ts / .test.ts       # Live Mode polling intervals, countdown & delta tracking
 │       ├── notesAutoSave.ts / .test.ts     # Researcher Notes periodic localStorage auto-save helpers
 │       ├── notifications.ts / .test.ts     # Quota threshold & alert notifications
+│       ├── quickNotes.ts / .test.ts        # Quick Notes localStorage persistence & state helpers
 │       ├── quota.ts / .test.ts             # Daily quota & failover calculation
 │       ├── reportPdf.ts / .test.ts         # jsPDF + html2canvas export preparation
 │       ├── reportSharing.ts / .test.ts     # Expiring report snapshot & clipboard formatter
 │       ├── reportsAnalytics.ts / .test.ts  # Verdict, confidence, and 30-day trend aggregation
 │       ├── resultsExport.ts / .test.ts     # Visible table CSV, JSON & formatted TXT report builders
 │       ├── resultsTable.ts / .test.ts      # Results table column sorting & Last Seen UTC extraction
+│       ├── riskScoreHeatmap.ts / .test.ts  # High/Medium/Low risk heatmap & posture aggregation
 │       ├── riskScoring.ts / .test.ts       # Weighted multi-provider confidence scoring
 │       ├── scheduler.ts / .test.ts         # Frontend schedule interval formatting
 │       ├── sessionExport.ts / .test.ts     # Portable full-session JSON serializer
+│       ├── sessionSnapshot.ts / .test.ts   # Shareable browser URL investigation snapshot encoder/decoder
 │       ├── theme.ts / .test.ts             # Light/Dark theme persistence
 │       ├── threatLandscape.ts / .test.ts   # D3 world map region summaries & cluster aggregation
 │       └── watchlist.ts / .test.ts         # Persistent watchlist state & status-change evaluator

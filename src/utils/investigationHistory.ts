@@ -436,3 +436,71 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
   return new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + ' UTC';
 }
+
+export interface RecentHistoryExportItem {
+  id: string;
+  createdAt: string;
+  timestamp: string;
+  title: string;
+  normalizedInput: string;
+  indicators: string[];
+  indicatorCount: number;
+  mode: 'sample' | 'live';
+  sources: string[];
+  verdictSummary: RecentVerdictSummary;
+  pinned: boolean;
+  pinnedAt: string | null;
+  reportFile: string | null;
+  tags: string[];
+  notes: string | null;
+}
+
+export interface RecentHistoryExportPayload {
+  exportedAt: string;
+  totalEntries: number;
+  investigations: RecentHistoryExportItem[];
+}
+
+export function buildRecentHistoryExportFilename(now: Date = new Date()): string {
+  const iso = now.toISOString();
+  const datePart = iso.slice(0, 10).replace(/-/g, '');
+  const timePart = iso.slice(11, 19).replace(/:/g, '');
+  return `soti_investigation_history_${datePart}_${timePart}.json`;
+}
+
+export function buildRecentHistoryExportPayload(
+  entries: readonly RecentInvestigationEntry[],
+  now: Date = new Date(),
+): RecentHistoryExportPayload {
+  const investigations: RecentHistoryExportItem[] = entries.map((entry) => ({
+    id: entry.id,
+    createdAt: entry.createdAt,
+    timestamp: entry.createdAt,
+    title: getInvestigationDisplayTitle(entry),
+    normalizedInput: entry.normalizedInput,
+    indicators: [...entry.indicators],
+    indicatorCount: entry.indicatorCount,
+    mode: entry.mode,
+    sources: [...entry.sourceLabels],
+    verdictSummary: { ...entry.verdictSummary },
+    pinned: Boolean(entry.pinned),
+    pinnedAt: entry.pinnedAt ?? null,
+    reportFile: entry.reportFile ?? null,
+    tags: Array.isArray(entry.tags) ? [...entry.tags] : [],
+    notes: entry.notes ?? null,
+  }));
+
+  return {
+    exportedAt: now.toISOString(),
+    totalEntries: investigations.length,
+    investigations,
+  };
+}
+
+export function serializeRecentHistoryExportJson(
+  entries: readonly RecentInvestigationEntry[],
+  now: Date = new Date(),
+): string {
+  return JSON.stringify(buildRecentHistoryExportPayload(entries, now), null, 2);
+}
+
