@@ -10,6 +10,8 @@ import {
   type RiskTierBucketId,
 } from '../utils/heatmapAnalytics';
 import type { ThemeMode } from '../utils/theme';
+import { maskIndicatorValue } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 export type HeatmapDataScope = 'all_runs' | 'selected_run';
 
@@ -75,6 +77,7 @@ export function IocRegionHeatmap({
   onInspectIndicator,
   onFilterRecentByRegion,
 }: IocRegionHeatmapProps) {
+  const privacyMode = usePrivacyMode();
   const isDark = theme === 'dark';
   const [dimension, setDimension] = useState<HeatmapDimension>('region');
   const [thresholdFilter, setThresholdFilter] =
@@ -584,7 +587,7 @@ export function IocRegionHeatmap({
                   >
                     <div className="flex flex-wrap items-center gap-2 min-w-0">
                       <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
-                        {item.indicator}
+                        {maskIndicatorValue(item.indicator, item.type, privacyMode)}
                       </span>
                       <span className="font-mono text-[11px] uppercase text-slate-500 dark:text-slate-400">
                         {item.type}

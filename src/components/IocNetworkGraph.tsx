@@ -19,6 +19,8 @@ import {
 import type { LookupResult } from '../utils/indicators';
 import { copyToClipboard } from '../utils/clipboard';
 import type { ThemeMode } from '../utils/theme';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface IocNetworkGraphProps {
   results: LookupResult[];
@@ -99,6 +101,7 @@ export function IocNetworkGraph({
   focusedIndicator,
   onFocusIndicatorChange,
 }: IocNetworkGraphProps) {
+  const privacyMode = usePrivacyMode();
   const [internalFocus, setInternalFocus] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -367,6 +370,14 @@ export function IocNetworkGraph({
       .attr('pointer-events', 'none')
       .text((d) => NODE_TYPE_META[d.data.type].short);
 
+    const formatGraphNodeLabel = (node: IocGraphNode): string => {
+      if (!privacyMode) return node.label;
+      if (node.type === 'ip' || node.type === 'domain' || node.type === 'file') {
+        return maskIndicatorValue(node.label, node.type === 'file' ? 'hash' : node.type, true);
+      }
+      return maskSensitiveText(node.label, true);
+    };
+
     // Readable indicator label below node
     nodeElements
       .append('text')
@@ -378,9 +389,24 @@ export function IocNetworkGraph({
       .attr('font-family', 'ui-monospace, SFMono-Regular, Menlo, monospace')
       .attr('fill', colors.nodeText)
       .attr('pointer-events', 'none')
-      .text((d) => shortenLabel(d.data));
+      .text((d) => {
+        const maskedLabel = formatGraphNodeLabel(d.data);
+        return shortenLabel({
+          ...d.data,
+          label: maskedLabel,
+          subLabel:
+            d.data.subLabel && privacyMode
+              ? maskSensitiveText(d.data.subLabel, true)
+              : d.data.subLabel,
+        });
+      });
 
-    nodeElements.append('title').text((d) => `${d.data.label} (${NODE_TYPE_META[d.data.type].label} · ${d.data.verdict})`);
+    nodeElements
+      .append('title')
+      .text(
+        (d) =>
+          `${formatGraphNodeLabel(d.data)} (${NODE_TYPE_META[d.data.type].label} · ${d.data.verdict})`,
+      );
 
     const renderPositions = () => {
       linkLines
@@ -422,7 +448,7 @@ export function IocNetworkGraph({
     return () => {
       simulation.stop();
     };
-  }, [graph, theme]);
+  }, [graph, theme, privacyMode]);
 
   // Highlight selected node ring without restarting force physics
   useEffect(() => {
@@ -466,7 +492,12 @@ export function IocNetworkGraph({
   }
 
   async function handleCopyNodeValue(node: IocGraphNode) {
-    const ok = await copyToClipboard(node.label);
+    const valToCopy = privacyMode
+      ? node.type === 'ip' || node.type === 'domain' || node.type === 'file'
+        ? maskIndicatorValue(node.label, node.type === 'file' ? 'hash' : node.type, true)
+        : maskSensitiveText(node.label, true)
+      : node.label;
+    const ok = await copyToClipboard(valToCopy);
     if (ok) {
       setCopiedId(node.id);
       if (copyTimerRef.current !== null) {
@@ -547,7 +578,9 @@ export function IocNetworkGraph({
           </button>
           {fullGraph.queriedIndicators.map((ind) => {
             const isSelected = activeFocus?.toLowerCase() === ind.toLowerCase();
-            const shortInd = ind.length > 20 ? `${ind.slice(0, 10)}...${ind.slice(-6)}` : ind;
+            const displayInd = maskIndicatorValue(ind, null, privacyMode);
+            const shortInd =
+              displayInd.length > 20 ? `${displayInd.slice(0, 10)}...${displayInd.slice(-6)}` : displayInd;
             return (
               <button
                 key={ind}
@@ -558,7 +591,7 @@ export function IocNetworkGraph({
                     ? 'bg-red-600 text-white'
                     : 'text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-700/60'
                 }`}
-                title={ind}
+                title={displayInd}
               >
                 {shortInd}
               </button>
@@ -613,11 +646,17 @@ export function IocNetworkGraph({
                   </span>
                 </div>
                 <p className="font-mono text-xs font-semibold text-slate-950 dark:text-slate-50 break-all">
-                  {selectedNode.label}
+                  {selectedNode.type === 'ip' || selectedNode.type === 'domain' || selectedNode.type === 'file'
+                    ? maskIndicatorValue(
+                        selectedNode.label,
+                        selectedNode.type === 'file' ? 'hash' : selectedNode.type,
+                        privacyMode,
+                      )
+                    : maskSensitiveText(selectedNode.label, privacyMode)}
                 </p>
                 {selectedNode.subLabel && (
                   <p className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-                    Filename: {selectedNode.subLabel}
+                    Filename: {maskSensitiveText(selectedNode.subLabel, privacyMode)}
                   </p>
                 )}
               </div>
@@ -696,7 +735,17 @@ export function IocNetworkGraph({
                             {isOutgoing ? link.label : `← ${link.label}`} · {peer ? NODE_TYPE_META[peer.type].short : ''}
                           </span>
                           <span className="mt-0.5 block font-mono text-[11px] font-medium text-slate-800 dark:text-slate-200 break-all">
-                            {peer?.subLabel ? `${peer.subLabel} (${peer.label.slice(0, 10)}...)` : peer?.label}
+                            {peer
+                              ? peer.type === 'ip' || peer.type === 'domain' || peer.type === 'file'
+                                ? maskIndicatorValue(
+                                    peer.label,
+                                    peer.type === 'file' ? 'hash' : peer.type,
+                                    privacyMode,
+                                  )
+                                : peer.subLabel
+                                  ? `${maskSensitiveText(peer.subLabel, privacyMode)} (${maskSensitiveText(peer.label, privacyMode)})`
+                                  : maskSensitiveText(peer.label, privacyMode)
+                              : ''}
                           </span>
                         </button>
                       </li>

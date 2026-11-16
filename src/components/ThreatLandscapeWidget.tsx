@@ -12,6 +12,8 @@ import {
   type ThreatClusterPoint,
 } from '../utils/threatLandscape';
 import type { ThemeMode } from '../utils/theme';
+import { maskIndicatorValue } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 export type ThreatLandscapeScope = 'active_realtime' | 'all_runs' | 'selected_run' | 'current_investigation';
 
@@ -65,6 +67,7 @@ export function ThreatLandscapeWidget({
   loading = false,
   onInspectIndicator,
 }: ThreatLandscapeWidgetProps) {
+  const privacyMode = usePrivacyMode();
   const isDark = theme === 'dark';
   const [thresholdFilter, setThresholdFilter] =
     useState<HeatmapThresholdFilter>('all');
@@ -655,7 +658,7 @@ export function ThreatLandscapeWidget({
                       <div className="truncate font-mono text-[11px] text-slate-700 dark:text-slate-200">
                         {mapTooltip.cluster.indicators
                           .slice(0, 2)
-                          .map((i) => i.indicator)
+                          .map((i) => maskIndicatorValue(i.indicator, null, privacyMode))
                           .join(', ')}
                       </div>
                     </div>
@@ -836,7 +839,7 @@ export function ThreatLandscapeWidget({
                     >
                       <div className="min-w-0">
                         <div className="font-mono font-medium text-slate-900 dark:text-slate-100 truncate">
-                          {item.indicator}
+                          {maskIndicatorValue(item.indicator, null, privacyMode)}
                         </div>
                         <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
                           <span className={getTierTextClass(

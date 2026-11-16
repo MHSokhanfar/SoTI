@@ -5,6 +5,8 @@ import {
   extractIocTimelineEvents,
   type TimelineCategory,
 } from '../utils/iocTimeline';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface IocEventTimelineProps {
   results: LookupResult[];
@@ -41,6 +43,7 @@ function getVerdictTextClass(verdict: Verdict): string {
 }
 
 export function IocEventTimeline({ results }: IocEventTimelineProps) {
+  const privacyMode = usePrivacyMode();
   const [selectedIndicator, setSelectedIndicator] = useState<string>('all');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
 
@@ -109,7 +112,7 @@ export function IocEventTimeline({ results }: IocEventTimelineProps) {
               <option value="all">All IOCs ({uniqueIndicators.length})</option>
               {uniqueIndicators.map((ind) => (
                 <option key={ind} value={ind}>
-                  {ind}
+                  {maskIndicatorValue(ind, null, privacyMode)}
                 </option>
               ))}
             </select>
@@ -151,7 +154,7 @@ export function IocEventTimeline({ results }: IocEventTimelineProps) {
                 </span>
                 <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
                 <span className="font-mono text-xs font-medium text-slate-950 dark:text-slate-50 break-all">
-                  {ev.indicator}
+                  {maskIndicatorValue(ev.indicator, null, privacyMode)}
                 </span>
               </div>
 
@@ -163,7 +166,7 @@ export function IocEventTimeline({ results }: IocEventTimelineProps) {
             </div>
 
             <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
-              {ev.detailKey}: {ev.summary}
+              {ev.detailKey}: {maskSensitiveText(ev.summary, privacyMode)}
             </p>
           </li>
         ))}

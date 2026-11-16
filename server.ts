@@ -2439,6 +2439,89 @@ async function createApp() {
     res.json({ ok: record.deliveryStatus !== 'failed', record, smtp: smtp.publicStatus });
   });
 
+  app.post('/api/alerts/rules/dispatch', async (req, res) => {
+    const savedConfig = await loadEmailAlertConfig();
+    const rawBody = req.body && typeof req.body === 'object' ? req.body : {};
+    const ruleName =
+      typeof rawBody.ruleName === 'string' && rawBody.ruleName.trim()
+        ? rawBody.ruleName.trim().slice(0, 80)
+        : 'Custom Alert Rule';
+    const minRiskScore = Number.isFinite(Number(rawBody.minRiskScore))
+      ? Math.max(1, Math.min(100, Math.round(Number(rawBody.minRiskScore))))
+      : savedConfig.minConfidenceScore;
+    const rawRecipients = Array.isArray(rawBody.recipients) ? rawBody.recipients : [];
+    const recipientsToUse =
+      rawRecipients.length > 0 ? rawRecipients : savedConfig.recipients;
+
+    if (recipientsToUse.length === 0) {
+      res.status(400).json({
+        error:
+          'No recipient email addresses configured for this rule or in global Email Rules.',
+      });
+      return;
+    }
+
+    const validated = validateAndNormalizeEmailAlertConfig({
+      ...savedConfig,
+      enabled: true,
+      recipients: recipientsToUse,
+      minConfidenceScore: minRiskScore,
+      riskTierPreset: 'Custom',
+      subjectPrefix: `[SoTI Rule: ${ruleName}]`,
+    });
+
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+
+    const rawMatches = Array.isArray(rawBody.matches) ? rawBody.matches : [];
+    const triggered: EmailAlertTriggeredIndicator[] = rawMatches
+      .filter((m: any) => m && typeof m.indicator === 'string' && m.indicator.trim())
+      .slice(0, 25)
+      .map((m: any) => ({
+        indicator: String(m.indicator).trim(),
+        confidenceScore: Number.isFinite(Number(m.confidenceScore))
+          ? Math.max(0, Math.min(100, Math.round(Number(m.confidenceScore))))
+          : minRiskScore,
+        riskLevel:
+          m.riskLevel === 'Critical' ||
+          m.riskLevel === 'High' ||
+          m.riskLevel === 'Medium' ||
+          m.riskLevel === 'Low'
+            ? m.riskLevel
+            : minRiskScore >= 75
+              ? 'Critical'
+              : 'High',
+        activeProviderCount: Number.isFinite(Number(m.activeProviderCount))
+          ? Math.max(1, Math.round(Number(m.activeProviderCount)))
+          : 1,
+        explanation:
+          typeof m.explanation === 'string' && m.explanation.trim()
+            ? m.explanation.trim()
+            : `Matched alert rule "${ruleName}" (>= ${minRiskScore}/100)`,
+      }));
+
+    if (triggered.length === 0) {
+      res.status(400).json({ error: 'At least one matched indicator is required.' });
+      return;
+    }
+
+    const mode: 'sample' | 'live' | 'test' =
+      rawBody.mode === 'live' || rawBody.mode === 'sample' || rawBody.mode === 'test'
+        ? rawBody.mode
+        : 'sample';
+
+    const record = await dispatchThresholdEmail({
+      config: validated.config,
+      triggered,
+      mode,
+      reportFile: typeof rawBody.reportFile === 'string' ? rawBody.reportFile : null,
+    });
+    const smtp = getSmtpTransportConfig();
+    res.json({ ok: record.deliveryStatus !== 'failed', record, smtp: smtp.publicStatus });
+  });
+
   app.post('/api/lookup', async (req, res) => {
     const raw = typeof req.body?.raw === 'string' ? req.body.raw : '';
     const source: SourceSelection = ['virustotal', 'abuseipdb', 'alienvault', 'all'].includes(req.body?.source)

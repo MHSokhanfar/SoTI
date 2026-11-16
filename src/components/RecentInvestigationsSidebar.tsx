@@ -36,6 +36,8 @@ import {
   type IndicatorTagMap,
 } from '../utils/iocTags';
 import { filterRecentInvestigationsByRegion } from '../utils/heatmapAnalytics';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface RecentInvestigationsSidebarProps {
   entries: RecentInvestigationEntry[];
@@ -86,6 +88,7 @@ export function RecentInvestigationsSidebar({
   onClearAll,
   embedded = false,
 }: RecentInvestigationsSidebarProps) {
+  const privacyMode = usePrivacyMode();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [selectedTag, setSelectedTag] = useState<string>('All');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -447,6 +450,9 @@ export function RecentInvestigationsSidebar({
             const fallbackTitle = formatInvestigationTitle(entry.indicators, entry.normalizedInput);
             const title = getInvestigationDisplayTitle(entry);
             const hasCustomTitle = Boolean(entry.customTitle && entry.customTitle.trim());
+            const maskedTitle = maskSensitiveText(title, privacyMode);
+            const maskedFallback = maskSensitiveText(fallbackTitle, privacyMode);
+            const maskedNotes = entry.notes ? maskSensitiveText(entry.notes, privacyMode) : '';
             const verdictBadge = getPrimaryVerdictBadge(entry.verdictSummary);
             const entryTags = getResolvedEntryTags(entry, indicatorTags);
             const isExpanded = expandedId === entry.id;
@@ -545,9 +551,15 @@ export function RecentInvestigationsSidebar({
                           className={`${
                             hasCustomTitle ? 'font-sans' : 'font-mono'
                           } text-xs font-semibold text-slate-900 dark:text-slate-100 truncate`}
-                          title={hasCustomTitle ? `${title} (${entry.normalizedInput})` : entry.normalizedInput}
+                          title={
+                            privacyMode
+                              ? maskedTitle
+                              : hasCustomTitle
+                                ? `${title} (${entry.normalizedInput})`
+                                : entry.normalizedInput
+                          }
                         >
-                          {title}
+                          {maskedTitle}
                         </div>
                       </div>
                     )}
@@ -556,7 +568,7 @@ export function RecentInvestigationsSidebar({
                       {hasCustomTitle && (
                         <>
                           <span className="font-mono text-slate-600 dark:text-slate-300 truncate max-w-[140px]">
-                            {fallbackTitle}
+                            {maskedFallback}
                           </span>
                           <span aria-hidden="true">·</span>
                         </>
@@ -572,10 +584,10 @@ export function RecentInvestigationsSidebar({
                       <p
                         data-testid="recent-entry-note-preview"
                         className="mt-1.5 flex items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300 truncate"
-                        title={entry.notes}
+                        title={maskedNotes}
                       >
                         <FileText className="h-3 w-3 shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />
-                        <span className="truncate">{entry.notes.replace(/\s+/g, ' ')}</span>
+                        <span className="truncate">{maskedNotes.replace(/\s+/g, ' ')}</span>
                       </p>
                     )}
 
@@ -682,7 +694,7 @@ export function RecentInvestigationsSidebar({
                         Indicators ({entry.indicatorCount}):{' '}
                       </span>
                       <span className="font-mono break-all text-slate-800 dark:text-slate-100">
-                        {entry.indicators.join(', ')}
+                        {entry.indicators.map((ind) => maskIndicatorValue(ind, null, privacyMode)).join(', ')}
                       </span>
                     </div>
                     <div>
@@ -730,7 +742,7 @@ export function RecentInvestigationsSidebar({
                           )}
                         </div>
                         <p className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-800 dark:text-slate-200">
-                          {entry.notes}
+                          {maskedNotes}
                         </p>
                       </div>
                     )}

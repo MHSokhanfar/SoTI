@@ -151,3 +151,67 @@ test('searchGlobalEntries supports filtering by tab and matching report filename
   assert.equal(scheduleHits[0].tab, 'scheduled');
   assert.equal(scheduleHits[0].scheduleId, 'sched-1');
 });
+
+test('buildGlobalSearchIndex attaches structured risk preview metadata to IOC, report, history, schedule, log, and provider entries', () => {
+  const index = makeFixtures();
+
+  const activeIoc = index.find((e) => e.id === 'inv-current:1.2.3.4');
+  assert.ok(activeIoc?.preview);
+  assert.equal(activeIoc.preview.verdictLabel, 'Malicious');
+  assert.equal(activeIoc.preview.indicatorType, 'IP');
+  assert.equal(typeof activeIoc.preview.riskScore, 'number');
+  assert.ok((activeIoc.preview.riskScore ?? 0) >= 50);
+  assert.equal(activeIoc.preview.primaryScore, '12/90');
+  assert.deepEqual(activeIoc.preview.sources, ['VirusTotal']);
+  assert.match(activeIoc.preview.snippet, /12 vendors flagged 1\.2\.3\.4/);
+
+  const reportIoc = index.find((e) => e.id === 'report-ioc:soti_20261114_090000.csv:1.2.3.4');
+  assert.ok(reportIoc?.preview);
+  assert.equal(reportIoc.preview.verdictLabel, 'Malicious');
+  assert.equal(reportIoc.preview.riskScore, activeIoc.preview.riskScore);
+  assert.match(reportIoc.preview.snippet, /12 vendors flagged 1\.2\.3\.4/);
+
+  const reportEntry = index.find((e) => e.id === 'report:soti_20261114_090000.csv');
+  assert.ok(reportEntry?.preview);
+  assert.equal(reportEntry.preview.indicatorType, 'CSV REPORT');
+  assert.equal(reportEntry.preview.riskScore, 50);
+  assert.match(reportEntry.preview.snippet, /4 lookup rows/);
+
+  const historyEntry = index.find((e) => e.id === 'inv-history:inv-1');
+  assert.ok(historyEntry?.preview);
+  assert.equal(historyEntry.preview.indicatorType, 'SESSION');
+  assert.equal(historyEntry.preview.verdictLabel, 'Clean');
+
+  const scheduleEntry = index.find((e) => e.id === 'schedule:sched-1');
+  assert.ok(scheduleEntry?.preview);
+  assert.equal(scheduleEntry.preview.indicatorType, 'SCHEDULE');
+  assert.equal(scheduleEntry.preview.verdictLabel, 'Active');
+
+  const logEntry = index.find((e) => e.kind === 'log');
+  assert.ok(logEntry?.preview);
+  assert.equal(logEntry.preview.indicatorType, 'LOG EVENT');
+  assert.equal(logEntry.preview.lastSeen, '2026-11-14 09:00:01');
+
+  const providerEntry = index.find((e) => e.id === 'provider:virustotal');
+  assert.ok(providerEntry?.preview);
+  assert.equal(providerEntry.preview.indicatorType, 'PROVIDER');
+  assert.equal(providerEntry.preview.verdictLabel, 'Enabled');
+});
+
+test('buildGlobalSearchIndex removes all history entries when recentInvestigations is cleared', () => {
+  const populated = makeFixtures();
+  assert.equal(populated.some((e) => e.kind === 'history'), true);
+
+  const clearedIndex = buildGlobalSearchIndex({
+    currentResults: [],
+    recentInvestigations: [],
+    reports: [],
+    schedules: [],
+    logLines: [],
+    apiSettings: cloneDefaultApiSettings(),
+  });
+  assert.equal(clearedIndex.some((e) => e.kind === 'history'), false);
+  const historyHits = searchGlobalEntries(clearedIndex, '9.9.9.9');
+  assert.equal(historyHits.length, 0);
+});
+

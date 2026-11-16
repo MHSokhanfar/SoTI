@@ -4,14 +4,17 @@ import {
   buildCustomEndpointUrl,
   buildHeartbeatEndpoint,
   buildTopBarApiStatuses,
+  classifyLatencyTier,
   cloneDefaultApiSettings,
   DEFAULT_API_SETTINGS,
   evaluateHeartbeatResponse,
+  formatLatencyMs,
   getAllEnabledProviderIds,
   getEnabledSourceIds,
   isEditableThreatIntelEnvVar,
   maskSecretHint,
   mergeConfigAndConnectionStatus,
+  normalizeLatencyMs,
   resolveSelectedSources,
   summarizeTopBarApiGroup,
   validateAndNormalizeApiSettings,
@@ -226,6 +229,18 @@ test('buildTopBarApiStatuses and summarizeTopBarApiGroup track core, extra (othe
   });
 });
 
+test('normalizeLatencyMs, classifyLatencyTier, and formatLatencyMs classify API latency tiers accurately', () => {
+  assert.equal(normalizeLatencyMs(142.6), 143);
+  assert.equal(normalizeLatencyMs(-5), 0);
+  assert.equal(normalizeLatencyMs(Number.NaN), 0);
 
+  assert.equal(classifyLatencyTier(45), 'fast');
+  assert.equal(classifyLatencyTier(399), 'fast');
+  assert.equal(classifyLatencyTier(400), 'moderate');
+  assert.equal(classifyLatencyTier(1199), 'moderate');
+  assert.equal(classifyLatencyTier(1200), 'slow');
+  assert.equal(classifyLatencyTier(2450), 'slow');
 
-
+  assert.equal(formatLatencyMs(88.4), '88ms');
+  assert.equal(formatLatencyMs(1520), '1520ms');
+});

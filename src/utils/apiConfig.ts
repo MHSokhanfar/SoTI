@@ -719,3 +719,28 @@ export function summarizeTopBarApiGroup(
   };
 }
 
+export type ProviderLatencyTier = 'fast' | 'moderate' | 'slow';
+
+export interface ProviderLatencySnapshot {
+  providerId: string;
+  providerLabel: string;
+  latencyMs: number;
+  ok: boolean;
+  checkedAt: string;
+}
+
+export function normalizeLatencyMs(latencyMs: number): number {
+  if (!Number.isFinite(latencyMs) || latencyMs <= 0) return 0;
+  return Math.round(latencyMs);
+}
+
+export function classifyLatencyTier(latencyMs: number): ProviderLatencyTier {
+  const clean = normalizeLatencyMs(latencyMs);
+  if (clean >= 1200) return 'slow';
+  if (clean >= 400) return 'moderate';
+  return 'fast';
+}
+
+export function formatLatencyMs(latencyMs: number): string {
+  return `${normalizeLatencyMs(latencyMs)}ms`;
+}

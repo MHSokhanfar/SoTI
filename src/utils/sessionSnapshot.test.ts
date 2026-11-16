@@ -28,6 +28,7 @@ test('buildSessionSnapshotUrl and decodeSessionSnapshot round-trip full investig
       'unrelated.org': ['Ignored'],
     },
     verdictFilter: 'Malicious',
+    resultsTagFilter: 'C2',
     riskThreshold: 50,
     tableSort: { key: 'riskScore', direction: 'desc' },
     createdAt: '2026-11-16T11:05:00.000Z',
@@ -80,6 +81,7 @@ test('buildSessionSnapshotUrl and decodeSessionSnapshot round-trip full investig
   assert.equal(decoded.researcherNotes, 'Confirmed C2 beacon — pivot to ASN 49505 🚨');
   assert.deepEqual(decoded.indicatorTags, { '1.2.3.4': ['C2', 'Critical'] });
   assert.equal(decoded.verdictFilter, 'Malicious');
+  assert.equal(decoded.resultsTagFilter, 'C2');
   assert.equal(decoded.riskThreshold, 50);
   assert.deepEqual(decoded.tableSort, { key: 'riskScore', direction: 'desc' });
   assert.equal(decoded.indicatorCount, 2);

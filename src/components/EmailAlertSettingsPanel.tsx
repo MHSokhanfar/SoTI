@@ -15,6 +15,8 @@ import {
   type EmailAlertRecord,
   type EmailAlertTierPreset,
 } from '../utils/emailAlerts';
+import { maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 export interface SmtpPublicStatus {
   configured: boolean;
@@ -46,6 +48,7 @@ export function EmailAlertSettingsPanel({
   refreshNonce = 0,
   onAlertDispatched,
 }: EmailAlertSettingsPanelProps) {
+  const privacyMode = usePrivacyMode();
   const [config, setConfig] = useState<EmailAlertConfig>(DEFAULT_EMAIL_ALERT_CONFIG);
   const [recipientsInput, setRecipientsInput] = useState('');
   const [smtp, setSmtp] = useState<SmtpPublicStatus>({
@@ -364,7 +367,7 @@ export function EmailAlertSettingsPanel({
             data-testid="email-alerts-status"
             className="rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/50 px-3 py-2 text-xs text-emerald-800 dark:text-emerald-200"
           >
-            {statusMsg}
+            {maskSensitiveText(statusMsg, privacyMode)}
           </div>
         )}
 
@@ -444,7 +447,7 @@ export function EmailAlertSettingsPanel({
                           <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden="true" />
                         )}
                         <span className="font-semibold text-slate-950 dark:text-slate-50 truncate">
-                          {rec.subject}
+                          {maskSensitiveText(rec.subject, privacyMode)}
                         </span>
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
@@ -488,7 +491,7 @@ export function EmailAlertSettingsPanel({
 
                   {isExpanded && (
                     <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-2.5 font-mono text-[11px] leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
-                      {rec.textBody}
+                      {maskSensitiveText(rec.textBody, privacyMode)}
                     </pre>
                   )}
                 </div>

@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  BellRing,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -27,6 +28,7 @@ import {
   Save,
   Search,
   Settings2,
+  Share2,
   ShieldAlert,
   SlidersHorizontal,
   Sparkles,
@@ -61,6 +63,8 @@ import { QuickNotesSidebarPanel } from './QuickNotesSidebarPanel';
 import { WatchlistSidebarTab } from './WatchlistSidebarTab';
 import { IocNetworkGraph } from './IocNetworkGraph';
 import { IocEventTimeline } from './IocEventTimeline';
+import { usePrivacyMode } from './PrivacyModeContext';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
 import {
   buildRecentInvestigationEntry,
   clearRecentInvestigations,
@@ -115,6 +119,7 @@ import {
   summarizeBulkInputStats,
   type InvestigationAnalysisMode,
 } from '../utils/bulkAnalysis';
+import { formatBulkIndicatorsText } from '../utils/bulkCsv';
 import {
   computeLivePollDelta,
   extractActiveIndicatorsForPolling,
@@ -235,11 +240,18 @@ interface InvestigateViewProps {
   onOpenApiConfig: () => void;
   onEmailAlertTriggered?: (record: EmailAlertRecord) => void;
   onOpenEmailAlertRules?: () => void;
+  onOpenAlertRules?: () => void;
+  onEvaluateAlertRules?: (
+    results: readonly LookupResult[],
+    mode: 'sample' | 'live',
+    reportFile?: string | null,
+  ) => void;
   navigationTarget?: InvestigateNavigationTarget | null;
   focusInputNonce?: number;
   recentRegionFilter?: string | null;
   onClearRecentRegionFilter?: () => void;
   onRecentHistoryChange?: (entries: RecentInvestigationEntry[]) => void;
+  clearHistoryNonce?: number;
   quickNotesState?: QuickNotesState;
   onChangeQuickNotesText?: (nextText: string) => void;
   onClearQuickNotes?: () => void;
@@ -434,11 +446,14 @@ export function InvestigateView({
   onOpenApiConfig,
   onEmailAlertTriggered,
   onOpenEmailAlertRules,
+  onOpenAlertRules,
+  onEvaluateAlertRules,
   navigationTarget,
   focusInputNonce = 0,
   recentRegionFilter = null,
   onClearRecentRegionFilter,
   onRecentHistoryChange,
+  clearHistoryNonce = 0,
   quickNotesState = DEFAULT_QUICK_NOTES_STATE,
   onChangeQuickNotesText = () => {},
   onClearQuickNotes = () => {},
@@ -454,6 +469,7 @@ export function InvestigateView({
   onAcknowledgeAllWatchlist,
   onEvaluateWatchlistResults,
 }: InvestigateViewProps) {
+  const privacyMode = usePrivacyMode();
   const [verdictFilter, setVerdictFilter] = useState<'All' | Verdict>('All');
   const [resultsTagFilter, setResultsTagFilter] = useState<string>('All');
   const [riskThreshold, setRiskThreshold] = useState<number>(() =>
@@ -583,6 +599,7 @@ export function InvestigateView({
     }
     setAppliedSnapshotCreatedAt(loadedSessionSnapshot.createdAt);
     setVerdictFilter(loadedSessionSnapshot.verdictFilter);
+    setResultsTagFilter(loadedSessionSnapshot.resultsTagFilter || 'All');
     setRiskThreshold(loadedSessionSnapshot.riskThreshold);
     setTableSort(loadedSessionSnapshot.tableSort);
     if (Object.keys(loadedSessionSnapshot.indicatorTags).length > 0) {
@@ -592,6 +609,24 @@ export function InvestigateView({
       }));
     }
   }, [loadedSessionSnapshot, appliedSnapshotCreatedAt]);
+
+  const lastHandledClearNonceRef = useRef(clearHistoryNonce);
+
+  useEffect(() => {
+    if (clearHistoryNonce > 0 && clearHistoryNonce !== lastHandledClearNonceRef.current) {
+      lastHandledClearNonceRef.current = clearHistoryNonce;
+      setRecentHistory([]);
+      onChangeState((prev) => ({ ...prev, activeHistoryId: null }));
+      const emptied = createEmptyNotesAutoSaveState();
+      notesAutoSaveRef.current = emptied;
+      setNotesAutoSave(emptied);
+      setNotesSaveStatus('idle');
+      if (typeof window !== 'undefined') {
+        clearRecentInvestigations(window.localStorage);
+        saveNotesAutoSaveState(window.localStorage, emptied);
+      }
+    }
+  }, [clearHistoryNonce, onChangeState]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -810,12 +845,20 @@ export function InvestigateView({
 
   function handleFileExtracted(summary: IndicatorFileSummary) {
     setErrorMsg(null);
+    const bulkText = formatBulkIndicatorsText(summary.parsed);
+    setBulkTableStyle('unified');
     onChangeState((prev) => ({
       ...prev,
-      rawInput: summary.parsed.rawText,
+      analysisMode: 'bulk',
+      rawInput: bulkText || summary.parsed.rawText,
       invalidTokens: [],
     }));
     setFileImportSummary(summary);
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        iocInputRef.current?.focus();
+      });
+    }
   }
 
   function handleFileError(message: string) {
@@ -1490,6 +1533,10 @@ export function InvestigateView({
         onEmailAlertTriggered?.(data.emailAlert.record);
       }
 
+      if (!isBackground) {
+        onEvaluateAlertRules?.(nextResults, resolvedMode, nextReportFile);
+      }
+
       if (nextReportFile) {
         onReportCreated(nextReportFile);
       }
@@ -1767,8 +1814,10 @@ export function InvestigateView({
     sessionExportTimerRef.current = window.setTimeout(() => setSessionExportedFile(null), 3500);
   }
 
-  async function handleCreateSessionSnapshot() {
-    if (state.results.length === 0 || typeof window === 'undefined') return;
+  async function handleOpenShareDialog(autoCopy = false) {
+    if ((state.results.length === 0 && !state.rawInput.trim()) || typeof window === 'undefined') {
+      return;
+    }
     const built = buildSessionSnapshotUrl(window.location.href, {
       analysisMode: state.analysisMode,
       mode: state.mode,
@@ -1785,6 +1834,7 @@ export function InvestigateView({
       researcherNotes: state.researcherNotes,
       indicatorTags,
       verdictFilter,
+      resultsTagFilter,
       riskThreshold,
       tableSort,
       results: state.results,
@@ -1792,13 +1842,20 @@ export function InvestigateView({
     setSnapshotUrl(built.url);
     setSnapshotSizeLabel(formatSnapshotPayloadSize(built.byteLength));
     setSnapshotTruncated(built.truncatedDetails);
+    setSnapshotCopied(false);
     setSnapshotModalOpen(true);
 
-    const copied = await copyToClipboard(built.url);
-    if (copied) {
-      setSnapshotCopied(true);
-      window.setTimeout(() => setSnapshotCopied(false), 2500);
+    if (autoCopy) {
+      const copied = await copyToClipboard(built.url);
+      if (copied) {
+        setSnapshotCopied(true);
+        window.setTimeout(() => setSnapshotCopied(false), 2500);
+      }
     }
+  }
+
+  function handleCreateSessionSnapshot() {
+    void handleOpenShareDialog(true);
   }
 
   function handlePrintInvestigation() {
@@ -2007,7 +2064,7 @@ export function InvestigateView({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 min-w-0 max-w-full">
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0 max-w-full md:justify-end">
             <div className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-slate-800 p-1" role="group" aria-label="Investigation workflow mode">
               <button
                 type="button"
@@ -2113,6 +2170,19 @@ export function InvestigateView({
                 ))}
               </select>
             </div>
+
+            <button
+              type="button"
+              data-testid="investigate-header-share-button"
+              disabled={state.results.length === 0 && !state.rawInput.trim()}
+              onClick={() => void handleOpenShareDialog(false)}
+              aria-label="Share current investigation context URL"
+              title="Open browser sharing dialog to copy current investigation context URL with active filters and results"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+            >
+              <Share2 className="h-3.5 w-3.5 text-red-600 dark:text-red-400 shrink-0" aria-hidden="true" />
+              <span>Share</span>
+            </button>
           </div>
         </div>
 
@@ -2339,8 +2409,12 @@ export function InvestigateView({
               id="ioc-input"
               data-testid={isBulkMode ? 'bulk-ioc-textarea' : 'standard-ioc-textarea'}
               rows={isBulkMode ? 6 : 3}
-              value={state.rawInput}
-              onChange={(e) => onChangeState((prev) => ({ ...prev, rawInput: e.target.value }))}
+              readOnly={privacyMode}
+              value={privacyMode ? maskSensitiveText(state.rawInput, true) : state.rawInput}
+              onChange={(e) => {
+                if (privacyMode) return;
+                onChangeState((prev) => ({ ...prev, rawInput: e.target.value }));
+              }}
               placeholder={
                 isBulkMode
                   ? 'Paste a list of indicators separated by newlines (one per line):\n1[.]2[.]3[.]4\n8.8.8.8\nhxxp://evil[.]com/login\n44d88612fea8a8f36de82e1278abb02f'
@@ -2397,7 +2471,7 @@ export function InvestigateView({
                 {parsedPreview.slice(0, 12).map((item, idx) => (
                   <span key={`${item.cleaned}-${idx}`} className="inline-flex flex-wrap items-center gap-1.5 font-mono max-w-full">
                     <span className={`break-all ${item.type ? 'text-slate-900 dark:text-slate-100' : 'text-red-600 dark:text-red-400 line-through'}`}>
-                      {item.cleaned}
+                      {maskIndicatorValue(item.cleaned, item.type, privacyMode)}
                     </span>
                     <span className="text-slate-400 dark:text-slate-600">/</span>
                     <span className={item.type ? 'text-slate-600 dark:text-slate-400' : 'text-red-600 dark:text-red-400'}>
@@ -2534,6 +2608,18 @@ export function InvestigateView({
                     <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
                     Configure APIs
                   </button>
+
+                  {onOpenAlertRules && (
+                    <button
+                      type="button"
+                      data-testid="open-alert-rules-btn"
+                      onClick={onOpenAlertRules}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <BellRing className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                      Alert Rules
+                    </button>
+                  )}
                 </div>
 
                 <button
@@ -2756,7 +2842,10 @@ export function InvestigateView({
 
         {state.invalidTokens.length > 0 && !errorMsg && (
           <div className="mt-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-2.5 text-xs text-amber-900 dark:text-amber-200">
-            Skipped invalid indicator(s): <span className="font-mono">{state.invalidTokens.join(', ')}</span>
+            Skipped invalid indicator(s):{' '}
+            <span className="font-mono">
+              {state.invalidTokens.map((t) => maskIndicatorValue(t, null, privacyMode)).join(', ')}
+            </span>
           </div>
         )}
 
@@ -2776,7 +2865,10 @@ export function InvestigateView({
                   Sent to <span className="font-mono">{lastEmailAlert.recipients.join(', ')}</span> for{' '}
                   <span className="font-mono font-medium">
                     {lastEmailAlert.triggeredIndicators
-                      .map((t) => `${t.indicator} (${t.confidenceScore}/100 ${t.riskLevel})`)
+                      .map(
+                        (t) =>
+                          `${maskIndicatorValue(t.indicator, null, privacyMode)} (${t.confidenceScore}/100 ${t.riskLevel})`,
+                      )
                       .join(', ')}
                   </span>
                 </p>
@@ -3145,7 +3237,7 @@ export function InvestigateView({
                         Manage tags for
                       </span>
                       <span className="font-mono font-semibold text-slate-950 dark:text-white break-all">
-                        {tableTaggingIndicator}
+                        {maskIndicatorValue(tableTaggingIndicator, null, privacyMode)}
                       </span>
                     </div>
                     <button
@@ -3318,14 +3410,27 @@ export function InvestigateView({
                         >
                           <td className="pl-3.5 pr-2 py-2.5 min-w-[140px] max-w-[185px] font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
                             <div className="flex items-start gap-1.5">
-                              <span className="break-all">{row.indicator}</span>
+                              <span className="break-all">
+                                {maskIndicatorValue(row.indicator, row.type, privacyMode)}
+                              </span>
                               <button
                                 type="button"
                                 data-testid="copy-indicator-value-btn"
                                 data-copied={isBatchValueCopied ? 'true' : 'false'}
-                                onClick={() => triggerClipboardCopy(row.indicator, batchValKey)}
-                                aria-label={`Copy indicator value ${row.indicator} to clipboard`}
-                                title={isBatchValueCopied ? `Copied ${row.indicator}` : `Copy ${row.indicator} to clipboard`}
+                                onClick={() =>
+                                  triggerClipboardCopy(
+                                    maskIndicatorValue(row.indicator, row.type, privacyMode),
+                                    batchValKey,
+                                  )
+                                }
+                                aria-label={`Copy indicator value ${maskIndicatorValue(row.indicator, row.type, privacyMode)} to clipboard`}
+                                title={
+                                  isBatchValueCopied
+                                    ? 'Copied'
+                                    : privacyMode
+                                      ? 'Copy masked indicator placeholder'
+                                      : `Copy ${row.indicator} to clipboard`
+                                }
                                 className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer print:hidden ${
                                   isBatchValueCopied
                                     ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
@@ -3457,7 +3562,7 @@ export function InvestigateView({
                               <td
                                 key={col.sourceId}
                                 className="px-2.5 py-3 whitespace-nowrap"
-                                title={cell.summary}
+                                title={maskSensitiveText(cell.summary, privacyMode)}
                               >
                                 <div className="space-y-0.5">
                                   <VerdictIndicator verdict={cell.verdict} status={cell.status} />
@@ -3605,14 +3710,27 @@ export function InvestigateView({
                       <tr key={rowKey} data-testid="summary-matrix-row" className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
                         <td className="pl-2.5 pr-1 py-2.5 min-w-[118px] max-w-[150px] font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
                           <div className="flex items-start gap-1.5">
-                            <span className="break-all">{r.indicator}</span>
+                            <span className="break-all">
+                              {maskIndicatorValue(r.indicator, r.type, privacyMode)}
+                            </span>
                             <button
                               type="button"
                               data-testid="copy-indicator-value-btn"
                               data-copied={isValueCopied ? 'true' : 'false'}
-                              onClick={() => triggerClipboardCopy(r.indicator, valCopyKey)}
-                              aria-label={`Copy indicator value ${r.indicator} to clipboard`}
-                              title={isValueCopied ? `Copied ${r.indicator}` : `Copy ${r.indicator} to clipboard`}
+                              onClick={() =>
+                                triggerClipboardCopy(
+                                  maskIndicatorValue(r.indicator, r.type, privacyMode),
+                                  valCopyKey,
+                                )
+                              }
+                              aria-label={`Copy indicator value ${maskIndicatorValue(r.indicator, r.type, privacyMode)} to clipboard`}
+                              title={
+                                isValueCopied
+                                  ? 'Copied'
+                                  : privacyMode
+                                    ? 'Copy masked indicator placeholder'
+                                    : `Copy ${r.indicator} to clipboard`
+                              }
                               className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer print:hidden ${
                                 isValueCopied
                                   ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
@@ -3744,7 +3862,9 @@ export function InvestigateView({
                         <td className="px-1 py-2.5 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
                           {r.score}
                         </td>
-                        <td className="px-1 py-2.5 text-[11px] text-slate-600 dark:text-slate-300 max-w-[116px] leading-snug">{r.summary}</td>
+                        <td className="px-1 py-2.5 text-[11px] text-slate-600 dark:text-slate-300 max-w-[116px] leading-snug">
+                          {maskSensitiveText(r.summary, privacyMode)}
+                        </td>
                         <td className="pl-1 pr-2.5 py-2.5 text-right whitespace-nowrap print:hidden">
                           <button
                             type="button"
@@ -3860,14 +3980,16 @@ export function InvestigateView({
               data-testid="researcher-notes-textarea"
               rows={3}
               maxLength={MAX_INVESTIGATION_NOTES_LENGTH}
-              value={state.researcherNotes}
+              readOnly={privacyMode}
+              value={privacyMode ? maskSensitiveText(state.researcherNotes, true) : state.researcherNotes}
               onChange={(e) => {
+                if (privacyMode) return;
                 const nextVal = e.target.value;
                 setNotesSaveStatus('idle');
                 onChangeState((prev) => ({ ...prev, researcherNotes: nextVal }));
               }}
               onBlur={() => {
-                if (hasPendingAutoSave) {
+                if (!privacyMode && hasPendingAutoSave) {
                   persistNotesToHistory(activeHistoryId, state.researcherNotes);
                 }
               }}
@@ -3879,13 +4001,18 @@ export function InvestigateView({
               data-testid="researcher-notes-print-body"
               className="hidden print:block mt-3 whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50/40 px-3.5 py-2.5 text-sm leading-relaxed text-slate-900"
             >
-              {state.researcherNotes.trim() || 'No researcher notes recorded for this investigation.'}
+              {state.researcherNotes.trim()
+                ? maskSensitiveText(state.researcherNotes, privacyMode)
+                : 'No researcher notes recorded for this investigation.'}
             </div>
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 print:hidden">
               <span className="text-[11px] text-slate-500 dark:text-slate-400">
                 {activeHistoryEntry
-                  ? `Synced to local storage & history entry: ${activeHistoryEntry.indicators.slice(0, 2).join(', ')}${activeHistoryEntry.indicators.length > 2 ? ` +${activeHistoryEntry.indicators.length - 2}` : ''}`
+                  ? `Synced to local storage & history entry: ${activeHistoryEntry.indicators
+                      .slice(0, 2)
+                      .map((ind) => maskIndicatorValue(ind, null, privacyMode))
+                      .join(', ')}${activeHistoryEntry.indicators.length > 2 ? ` +${activeHistoryEntry.indicators.length - 2}` : ''}`
                   : 'Persists automatically to browser local storage every 3s.'}
               </span>
 
@@ -3941,7 +4068,7 @@ export function InvestigateView({
                   <div className="min-w-0 space-y-2">
                     <div className="flex flex-wrap items-baseline gap-3">
                       <h3 className="font-mono text-base font-semibold text-slate-950 dark:text-slate-50 break-all">
-                        {group.indicator}
+                        {maskIndicatorValue(group.indicator, group.type, privacyMode)}
                       </h3>
                       <span className="font-mono text-xs text-slate-500 dark:text-slate-400">{group.type}</span>
                     </div>
@@ -4175,7 +4302,9 @@ export function InvestigateView({
                     <span className="font-medium text-slate-700 dark:text-slate-300">
                       Weighted Risk ({confidence.activeProviderCount} active):
                     </span>
-                    <span className="font-mono tabular-nums">{confidence.explanation}</span>
+                    <span className="font-mono tabular-nums">
+                      {maskSensitiveText(confidence.explanation, privacyMode)}
+                    </span>
                   </div>
                 )}
 
@@ -4187,7 +4316,9 @@ export function InvestigateView({
                         <VerdictIndicator verdict={item.verdict} status={item.status} />
                       </div>
 
-                      <p className="text-xs text-slate-600 dark:text-slate-300">{item.summary}</p>
+                      <p className="text-xs text-slate-600 dark:text-slate-300">
+                        {maskSensitiveText(item.summary, privacyMode)}
+                      </p>
 
                       {Object.keys(item.details).length > 0 && (
                         <dl className="divide-y divide-slate-100 dark:divide-slate-800 border-t border-slate-100 dark:border-slate-800 text-xs">
@@ -4195,7 +4326,7 @@ export function InvestigateView({
                             <div key={k} className="flex items-baseline justify-between gap-4 py-1.5">
                               <dt className="text-slate-500 dark:text-slate-400 shrink-0">{k}</dt>
                               <dd className="text-right font-mono text-slate-800 dark:text-slate-200 tabular-nums break-all">
-                                {String(v)}
+                                {maskSensitiveText(String(v), privacyMode)}
                               </dd>
                             </div>
                           ))}
@@ -4337,24 +4468,28 @@ export function InvestigateView({
           onClick={(e) => {
             if (e.target === e.currentTarget) {
               setSnapshotModalOpen(false);
+              setSnapshotCopied(false);
             }
           }}
         >
           <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 px-5 py-4">
               <div className="flex items-center gap-2 min-w-0">
-                <Link2 className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                <Share2 className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
                 <h2
                   id="session-snapshot-modal-title"
                   className="text-base font-semibold text-slate-950 dark:text-slate-50"
                 >
-                  Shareable Session Snapshot
+                  Share Investigation Context
                 </h2>
               </div>
               <button
                 type="button"
-                aria-label="Close session snapshot modal"
-                onClick={() => setSnapshotModalOpen(false)}
+                aria-label="Close share investigation modal"
+                onClick={() => {
+                  setSnapshotModalOpen(false);
+                  setSnapshotCopied(false);
+                }}
                 className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
               >
                 <X className="h-4 w-4" aria-hidden="true" />
@@ -4363,19 +4498,43 @@ export function InvestigateView({
 
             <div className="space-y-4 px-5 py-4 text-xs">
               <p className="leading-relaxed text-slate-600 dark:text-slate-300">
-                Your current investigation results, indicator tags, active Risk Threshold / verdict filters, table sort state, and Researcher Notes are serialized directly into this browser-only URL. Anyone opening it picks up right where you left off.
+                Copy this browser-only URL to share the current investigation context—including enriched results, active verdict/tag/risk filters, table sort order, indicator tags, and Researcher Notes.
               </p>
 
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-slate-600 dark:text-slate-300 tabular-nums">
-                <span>{resultIndicatorsList.length} IOCs</span>
+              <div
+                data-testid="share-context-summary"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-slate-600 dark:text-slate-300 tabular-nums"
+              >
+                <span>
+                  {resultIndicatorsList.length > 0
+                    ? resultIndicatorsList.length
+                    : parsedPreview.filter((p) => p.type !== null).length}{' '}
+                  IOCs
+                </span>
                 <span>·</span>
                 <span>{state.results.length} findings</span>
                 <span>·</span>
-                <span>Filter: {verdictFilter}</span>
+                <span>Mode: {isBulkMode ? 'Bulk' : 'Standard'}</span>
+                <span>·</span>
+                <span>Verdict: {verdictFilter}</span>
+                {resultsTagFilter !== 'All' && (
+                  <>
+                    <span>·</span>
+                    <span>Tag: {resultsTagFilter}</span>
+                  </>
+                )}
                 {riskThreshold > 0 && (
                   <>
                     <span>·</span>
                     <span>Min Risk: {riskThreshold}+</span>
+                  </>
+                )}
+                {tableSort && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      Sort: {tableSort.key} ({tableSort.direction})
+                    </span>
                   </>
                 )}
                 <span>·</span>
@@ -4393,7 +4552,7 @@ export function InvestigateView({
                   htmlFor="session-snapshot-url-input"
                   className="block font-medium text-slate-700 dark:text-slate-300"
                 >
-                  Shareable Browser Link
+                  Investigation Context URL
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -4434,24 +4593,48 @@ export function InvestigateView({
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 px-5 py-3 text-xs">
+              <div className="flex flex-wrap items-center gap-4">
+                <button
+                  type="button"
+                  data-testid="apply-session-snapshot-url-btn"
+                  onClick={() => {
+                    if (typeof window !== 'undefined' && snapshotUrl) {
+                      window.history.replaceState({}, '', snapshotUrl);
+                      setSnapshotCopied(true);
+                      window.setTimeout(() => setSnapshotCopied(false), 1800);
+                    }
+                  }}
+                  className="font-medium text-slate-700 dark:text-slate-300 hover:text-red-700 dark:hover:text-red-400 hover:underline whitespace-nowrap cursor-pointer"
+                >
+                  Update Address Bar URL
+                </button>
+                {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
+                  <button
+                    type="button"
+                    data-testid="native-share-investigation-btn"
+                    onClick={() => {
+                      void navigator
+                        .share({
+                          title: 'SoTI Investigation Context',
+                          text: `Shared threat investigation (${state.results.length} findings)`,
+                          url: snapshotUrl,
+                        })
+                        .catch(() => {});
+                    }}
+                    className="inline-flex items-center gap-1 font-medium text-slate-700 dark:text-slate-300 hover:text-red-700 dark:hover:text-red-400 hover:underline whitespace-nowrap cursor-pointer"
+                  >
+                    <Share2 className="h-3 w-3" aria-hidden="true" />
+                    <span>Browser Share...</span>
+                  </button>
+                )}
+              </div>
               <button
                 type="button"
-                data-testid="apply-session-snapshot-url-btn"
                 onClick={() => {
-                  if (typeof window !== 'undefined' && snapshotUrl) {
-                    window.history.replaceState({}, '', snapshotUrl);
-                    setSnapshotCopied(true);
-                    window.setTimeout(() => setSnapshotCopied(false), 1800);
-                  }
+                  setSnapshotModalOpen(false);
+                  setSnapshotCopied(false);
                 }}
-                className="font-medium text-slate-700 dark:text-slate-300 hover:text-red-700 dark:hover:text-red-400 hover:underline cursor-pointer"
-              >
-                Update Address Bar URL
-              </button>
-              <button
-                type="button"
-                onClick={() => setSnapshotModalOpen(false)}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
               >
                 Done
               </button>

@@ -21,6 +21,8 @@ import {
   type RiskHeatmapViewMode,
 } from '../utils/riskScoreHeatmap';
 import type { ThemeMode } from '../utils/theme';
+import { maskIndicatorValue } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface RiskScoreHeatmapProps {
   reports: ReportMeta[];
@@ -116,6 +118,7 @@ export function RiskScoreHeatmap({
   onSelectReport,
   onInspectIndicator,
 }: RiskScoreHeatmapProps) {
+  const privacyMode = usePrivacyMode();
   const isDark = theme === 'dark';
   const [mode, setMode] = useState<RiskHeatmapViewMode>('investigations');
   const [hoveredCell, setHoveredCell] = useState<RiskHeatmapCell | null>(null);
@@ -644,7 +647,7 @@ export function RiskScoreHeatmap({
                   >
                     <div className="flex flex-wrap items-center gap-2 min-w-0">
                       <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
-                        {item.indicator}
+                        {maskIndicatorValue(item.indicator, item.type, privacyMode)}
                       </span>
                       <span className="font-mono text-[11px] uppercase text-slate-500 dark:text-slate-400">
                         {item.type}

@@ -1,1 +1,50 @@
-[]
+[
+  {
+    "id": "email-1794830608065-43c94",
+    "createdAt": "2026-11-16T12:03:28.065Z",
+    "mode": "test",
+    "deliveryMethod": "local_outbox",
+    "deliveryStatus": "queued",
+    "statusDetail": "SMTP relay not configured (.env) — alert email composed & saved to local outbox (.eml downloadable).",
+    "recipients": [
+      "soc@example.com"
+    ],
+    "thresholdScore": 45,
+    "subject": "[SoTI Rule: High Risk Domain Rule] High IOC Detected: evil-test.example (88/100)",
+    "textBody": "SoTI Threat Intelligence — Threshold Alert Notification\r\n======================================================\r\nTimestamp:       2026-11-16T12:03:28Z\r\nMode:            TEST\r\nThreshold Rule:  Confidence Score >= 45/100 (Custom)\r\nMatched IOCs:    1\r\n\r\nTriggered Indicators:\r\n  1. evil-test.example — 88/100 (High) [3 active providers]\n     Breakdown: Rule \"High Risk Domain Rule\" test trigger (score >= 45)\r\n\r\nReview this alert in the SoTI workbench Reports or Investigate tab.",
+    "emlContent": "From: soti-alerts@soti.local\r\nTo: soc@example.com\r\nSubject: [SoTI Rule: High Risk Domain Rule] High IOC Detected: evil-test.\r\nDate: Mon, 16 Nov 2026 12:03:28 GMT\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nSoTI Threat Intelligence — Threshold Alert Notification\r\n======================================================\r\nTimestamp:       2026-11-16T12:03:28Z\r\nMode:            TEST\r\nThreshold Rule:  Confidence Score >= 45/100 (Custom)\r\nMatched IOCs:    1\r\n\r\nTriggered Indicators:\r\n  1. evil-test.example — 88/100 (High) [3 active providers]\n     Breakdown: Rule \"High Risk Domain Rule\" test trigger (score >= 45)\r\n\r\nReview this alert in the SoTI workbench Reports or Investigate tab.",
+    "triggeredIndicators": [
+      {
+        "indicator": "evil-test.example",
+        "confidenceScore": 88,
+        "riskLevel": "High",
+        "activeProviderCount": 3,
+        "explanation": "Rule \"High Risk Domain Rule\" test trigger (score >= 45)"
+      }
+    ]
+  },
+  {
+    "id": "email-1794830411563-82ad7",
+    "createdAt": "2026-11-16T12:00:11.563Z",
+    "mode": "test",
+    "deliveryMethod": "local_outbox",
+    "deliveryStatus": "queued",
+    "statusDetail": "SMTP relay not configured (.env) — alert email composed & saved to local outbox (.eml downloadable).",
+    "recipients": [
+      "soc@example.com"
+    ],
+    "thresholdScore": 45,
+    "subject": "[SoTI Rule: High Risk Domain Rule] High IOC Detected: evil-test.example (88/100)",
+    "textBody": "SoTI Threat Intelligence — Threshold Alert Notification\r\n======================================================\r\nTimestamp:       2026-11-16T12:00:11Z\r\nMode:            TEST\r\nThreshold Rule:  Confidence Score >= 45/100 (Custom)\r\nMatched IOCs:    1\r\n\r\nTriggered Indicators:\r\n  1. evil-test.example — 88/100 (High) [3 active providers]\n     Breakdown: Rule \"High Risk Domain Rule\" test trigger (score >= 45)\r\n\r\nReview this alert in the SoTI workbench Reports or Investigate tab.",
+    "emlContent": "From: soti-alerts@soti.local\r\nTo: soc@example.com\r\nSubject: [SoTI Rule: High Risk Domain Rule] High IOC Detected: evil-test.\r\nDate: Mon, 16 Nov 2026 12:00:11 GMT\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nSoTI Threat Intelligence — Threshold Alert Notification\r\n======================================================\r\nTimestamp:       2026-11-16T12:00:11Z\r\nMode:            TEST\r\nThreshold Rule:  Confidence Score >= 45/100 (Custom)\r\nMatched IOCs:    1\r\n\r\nTriggered Indicators:\r\n  1. evil-test.example — 88/100 (High) [3 active providers]\n     Breakdown: Rule \"High Risk Domain Rule\" test trigger (score >= 45)\r\n\r\nReview this alert in the SoTI workbench Reports or Investigate tab.",
+    "triggeredIndicators": [
+      {
+        "indicator": "evil-test.example",
+        "confidenceScore": 88,
+        "riskLevel": "High",
+        "activeProviderCount": 3,
+        "explanation": "Rule \"High Risk Domain Rule\" test trigger (score >= 45)"
+      }
+    ]
+  }
+]

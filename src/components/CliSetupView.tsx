@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Activity,
+  BellRing,
   CheckCircle2,
   Eye,
   EyeOff,
@@ -27,10 +28,12 @@ import {
   type BuiltinExtraSourceId,
   type CustomThreatProvider,
 } from '../utils/apiConfig';
+import type { AlertRuleTriggerHistoryEntry, CustomAlertRule } from '../utils/alertRules';
 import type { EmailAlertRecord } from '../utils/emailAlerts';
-import type { IndicatorType, SourceId } from '../utils/indicators';
+import type { IndicatorType, LookupResult, SourceId } from '../utils/indicators';
 import type { ProviderQuotaSnapshot } from '../utils/quota';
 import type { QuotaState } from '../App';
+import { AlertRulesPanel } from './AlertRulesPanel';
 import { EmailAlertSettingsPanel } from './EmailAlertSettingsPanel';
 
 interface CliSetupViewProps {
@@ -45,13 +48,22 @@ interface CliSetupViewProps {
   apiSettings: ApiSettings;
   quota: QuotaState;
   emailAlertsRefreshNonce?: number;
+  alertRules?: CustomAlertRule[];
+  alertRuleHistory?: AlertRuleTriggerHistoryEntry[];
+  currentResults?: readonly LookupResult[];
   onApiSettingsChange: (next: ApiSettings) => void;
   onKeyStatusUpdated?: () => void;
   onQuotaChange: (next: QuotaState) => void;
-  onConnectionTestResult?: (provider: string, ok: boolean) => void;
+  onConnectionTestResult?: (provider: string, ok: boolean, latencyMs?: number) => void;
   onConnectionOverridesReset?: () => void;
   onOpenHelp?: () => void;
   onEmailAlertDispatched?: (record: EmailAlertRecord) => void;
+  onSaveAlertRule?: (rule: CustomAlertRule) => void;
+  onToggleAlertRule?: (ruleId: string) => void;
+  onDeleteAlertRule?: (ruleId: string) => void;
+  onTestAlertRule?: (rule: CustomAlertRule) => Promise<{ ok: boolean; message: string }>;
+  onEvaluateAlertRulesNow?: () => { matchedRules: number; message: string };
+  onClearAlertRuleHistory?: () => void;
 }
 
 interface ConnectionTestResult {
@@ -132,6 +144,9 @@ export function CliSetupView({
   apiSettings,
   quota,
   emailAlertsRefreshNonce = 0,
+  alertRules = [],
+  alertRuleHistory = [],
+  currentResults = [],
   onApiSettingsChange,
   onKeyStatusUpdated,
   onQuotaChange,
@@ -139,6 +154,12 @@ export function CliSetupView({
   onConnectionOverridesReset,
   onOpenHelp,
   onEmailAlertDispatched,
+  onSaveAlertRule,
+  onToggleAlertRule,
+  onDeleteAlertRule,
+  onTestAlertRule,
+  onEvaluateAlertRulesNow,
+  onClearAlertRuleHistory,
 }: CliSetupViewProps) {
   const [draft, setDraft] = useState<ApiSettings>(apiSettings);
   const [saving, setSaving] = useState(false);
@@ -519,6 +540,7 @@ export function CliSetupView({
     }
 
     setTestingMap((prev) => ({ ...prev, [id]: true }));
+    const clientStart = performance.now();
     try {
       const resp = await fetch('/api/config/apis/test', {
         method: 'POST',
@@ -531,30 +553,36 @@ export function CliSetupView({
       });
       const data = await resp.json();
       const ok = Boolean(data.ok);
+      const clientElapsed = Math.max(1, Math.round(performance.now() - clientStart));
+      const measuredLatency =
+        typeof data.latencyMs === 'number' && data.latencyMs > 0
+          ? Math.round(data.latencyMs)
+          : clientElapsed;
       setTestResults((prev) => ({
         ...prev,
         [id]: {
           ok,
           httpStatus: Number(data.httpStatus || 0),
-          latencyMs: Number(data.latencyMs || 0),
+          latencyMs: measuredLatency,
           message: data.message || data.error || 'Heartbeat check completed.',
         },
       }));
       if (data.quota?.date && Array.isArray(data.quota?.providers)) {
         onQuotaChange(data.quota);
       }
-      onConnectionTestResult?.(id, ok);
+      onConnectionTestResult?.(id, ok, measuredLatency);
     } catch {
+      const clientElapsed = Math.max(1, Math.round(performance.now() - clientStart));
       setTestResults((prev) => ({
         ...prev,
         [id]: {
           ok: false,
           httpStatus: 0,
-          latencyMs: 0,
+          latencyMs: clientElapsed,
           message: 'Unable to reach local server for heartbeat check.',
         },
       }));
-      onConnectionTestResult?.(id, false);
+      onConnectionTestResult?.(id, false, clientElapsed);
     } finally {
       setTestingMap((prev) => ({ ...prev, [id]: false }));
     }
@@ -1294,6 +1322,39 @@ export function CliSetupView({
             </div>
           )}
         </form>
+      </section>
+
+      <section
+        aria-label="Custom Alert Rules and Triggers"
+        data-testid="cli-alert-rules-section"
+        className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5"
+      >
+        <div className="border-b border-slate-100 dark:border-slate-800 pb-4">
+          <div className="flex items-center gap-2">
+            <BellRing className="h-4 w-4 text-slate-700 dark:text-slate-300" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">
+              Custom Alert Rules &amp; Triggers
+            </h2>
+          </div>
+          <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
+            Define custom detection triggers scoped by indicator type (<code className="font-mono">Domain</code>, <code className="font-mono">IP</code>, <code className="font-mono">Hash</code>, <code className="font-mono">URL</code>) and Risk Score threshold to dispatch browser desktop notifications or emails automatically on investigation results.
+          </p>
+        </div>
+
+        <AlertRulesPanel
+          rules={alertRules}
+          history={alertRuleHistory}
+          currentResults={currentResults}
+          onSaveRule={(rule) => onSaveAlertRule?.(rule)}
+          onToggleRule={(id) => onToggleAlertRule?.(id)}
+          onDeleteRule={(id) => onDeleteAlertRule?.(id)}
+          onTestRule={
+            onTestAlertRule ||
+            (async () => ({ ok: false, message: 'Rule testing unavailable.' }))
+          }
+          onEvaluateCurrentResults={onEvaluateAlertRulesNow}
+          onClearHistory={onClearAlertRuleHistory}
+        />
       </section>
 
       <section

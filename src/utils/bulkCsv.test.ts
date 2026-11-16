@@ -4,6 +4,7 @@ import {
   extractIndicatorsFromCsv,
   extractIndicatorsFromFile,
   extractIndicatorsFromTxt,
+  formatBulkIndicatorsText,
   isSupportedIndicatorFile,
   parseCsvMatrix,
 } from './bulkCsv';
@@ -38,6 +39,10 @@ test('extractIndicatorsFromCsv prioritizes IOC header columns, deduplicates, and
   assert.equal(res.skippedCount, 1);
   assert.deepEqual(res.breakdown, { ip: 2, domain: 1, hash: 1 });
   assert.equal(res.sourceFormat, 'csv');
+  assert.equal(
+    formatBulkIndicatorsText(res),
+    '1.2.3.4\nevil.com\n8.8.8.8\n44d88612fea8a8f36de82e1278abb02f',
+  );
 });
 
 test('extractIndicatorsFromCsv extracts IOCs cleanly from headerless CSV files', () => {

@@ -14,6 +14,8 @@ import {
   summarizeQuickNotesStats,
   type QuickNotesState,
 } from '../utils/quickNotes';
+import { maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface QuickNotesSidebarPanelProps {
   notesState: QuickNotesState;
@@ -32,6 +34,7 @@ export function QuickNotesSidebarPanel({
   variant = 'embedded',
   onCloseDrawer,
 }: QuickNotesSidebarPanelProps) {
+  const privacyMode = usePrivacyMode();
   const [copied, setCopied] = useState(false);
   const [undoText, setUndoText] = useState<string | null>(null);
   const undoTimerRef = useRef<number | null>(null);
@@ -44,13 +47,14 @@ export function QuickNotesSidebarPanel({
     };
   }, []);
 
+  const visibleText = privacyMode ? maskSensitiveText(notesState.text, true) : notesState.text;
   const stats = summarizeQuickNotesStats(notesState.text);
   const savedUtc = formatQuickNotesUtc(notesState.updatedAt);
   const isCollapsed = variant === 'embedded' && notesState.collapsed;
 
   async function handleCopy() {
-    if (!notesState.text.trim()) return;
-    const ok = await copyToClipboard(notesState.text);
+    if (!visibleText.trim()) return;
+    const ok = await copyToClipboard(visibleText);
     if (ok) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
@@ -159,8 +163,10 @@ export function QuickNotesSidebarPanel({
             <textarea
               data-testid={`${testPrefix}-textarea`}
               aria-label="Quick Notes persistent scratchpad"
-              value={notesState.text}
+              readOnly={privacyMode}
+              value={visibleText}
               onChange={(e) => {
+                if (privacyMode) return;
                 if (undoText !== null) setUndoText(null);
                 onChangeText(e.target.value);
               }}

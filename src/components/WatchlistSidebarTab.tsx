@@ -15,6 +15,8 @@ import {
   countUnreadWatchlistUpdates,
   type WatchlistItem,
 } from '../utils/watchlist';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface WatchlistSidebarTabProps {
   items: WatchlistItem[];
@@ -52,6 +54,7 @@ export function WatchlistSidebarTab({
   onAcknowledgeItem,
   onAcknowledgeAll,
 }: WatchlistSidebarTabProps) {
+  const privacyMode = usePrivacyMode();
   const [inputValue, setInputValue] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -154,7 +157,7 @@ export function WatchlistSidebarTab({
 
         {formError && (
           <p className="text-[11px] font-medium text-red-700 dark:text-red-400">
-            {formError}
+            {maskSensitiveText(formError, privacyMode)}
           </p>
         )}
 
@@ -202,7 +205,7 @@ export function WatchlistSidebarTab({
                         />
                       )}
                       <span className="font-mono text-xs font-semibold text-slate-950 dark:text-slate-50 break-all">
-                        {item.indicator}
+                        {maskIndicatorValue(item.indicator, item.type, privacyMode)}
                       </span>
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
@@ -232,7 +235,7 @@ export function WatchlistSidebarTab({
                     type="button"
                     data-testid="watchlist-remove-btn"
                     onClick={() => onRemoveIndicator(item.indicator)}
-                    aria-label={`Remove ${item.indicator} from Watchlist`}
+                    aria-label={`Remove ${maskIndicatorValue(item.indicator, item.type, privacyMode)} from Watchlist`}
                     title="Stop monitoring"
                     className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-red-600 dark:hover:text-red-400 shrink-0 cursor-pointer"
                   >
@@ -252,14 +255,14 @@ export function WatchlistSidebarTab({
                     <div className="flex items-center justify-between gap-2">
                       <span className="inline-flex items-center gap-1 font-medium">
                         <ArrowRight className="h-3 w-3 shrink-0" aria-hidden="true" />
-                        <span>{item.lastChange.summary}</span>
+                        <span>{maskSensitiveText(item.lastChange.summary, privacyMode)}</span>
                       </span>
                       {hasUnread && (
                         <button
                           type="button"
                           data-testid="watchlist-ack-btn"
                           onClick={() => onAcknowledgeItem(item.indicator)}
-                          aria-label={`Acknowledge update for ${item.indicator}`}
+                          aria-label={`Acknowledge update for ${maskIndicatorValue(item.indicator, item.type, privacyMode)}`}
                           className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-950/60 whitespace-nowrap shrink-0 cursor-pointer"
                         >
                           <Check className="h-3 w-3" aria-hidden="true" />

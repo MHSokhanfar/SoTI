@@ -1,7 +1,9 @@
 import { EXTRA_PROVIDER_META, type ApiSettings } from './apiConfig';
 import { cleanIndicator, type LookupResult } from './indicators';
 import type { RecentInvestigationEntry } from './investigationHistory';
+import { extractResultLastSeen } from './resultsTable';
 import { formatRunLabel, type ReportMeta } from './reportsAnalytics';
+import { computeAllIocConfidenceScores } from './riskScoring';
 import { formatIntervalLabel, type ScheduledJob } from './scheduler';
 
 export type SearchableTab = 'investigate' | 'reports' | 'scheduled' | 'logs' | 'cli';
@@ -15,6 +17,18 @@ export type GlobalSearchKind =
   | 'provider';
 
 export type VerdictTone = 'malicious' | 'suspicious' | 'clean' | 'neutral';
+
+export interface GlobalSearchPreview {
+  indicatorType?: string;
+  verdictLabel: string;
+  riskScore: number | null;
+  riskLevel?: string;
+  primaryScore?: string;
+  sources: string[];
+  lastSeen?: string;
+  snippet: string;
+  tags?: string[];
+}
 
 export interface GlobalSearchEntry {
   id: string;
@@ -31,6 +45,7 @@ export interface GlobalSearchEntry {
   scheduleId?: string;
   logQuery?: string;
   providerId?: string;
+  preview: GlobalSearchPreview;
 }
 
 export interface GlobalSearchIndexParams {
@@ -86,6 +101,19 @@ function verdictSummaryToTone(summary: {
   return 'neutral';
 }
 
+function toneToVerdictLabel(tone: VerdictTone): string {
+  switch (tone) {
+    case 'malicious':
+      return 'Malicious';
+    case 'suspicious':
+      return 'Suspicious';
+    case 'clean':
+      return 'Clean';
+    default:
+      return 'Unknown';
+  }
+}
+
 export function normalizeGlobalSearchQuery(rawQuery: string): {
   rawLower: string;
   cleanedLower: string;
@@ -125,6 +153,22 @@ export function buildGlobalSearchIndex({
 }: GlobalSearchIndexParams): GlobalSearchEntry[] {
   const entries: GlobalSearchEntry[] = [];
 
+  // Shared lookup telemetry cache across active lookup + saved history so report/history previews show rich risk metadata
+  const currentConfidenceMap = computeAllIocConfidenceScores(currentResults);
+  const indicatorTelemetry = new Map<
+    string,
+    {
+      riskScore: number | null;
+      riskLevel?: string;
+      verdictLabel: string;
+      primaryScore?: string;
+      sources: string[];
+      lastSeen?: string;
+      snippet: string;
+      type: string;
+    }
+  >();
+
   // 1. Active Investigate results grouped by unique indicator
   const currentByIndicator = new Map<string, LookupResult[]>();
   for (const res of currentResults) {
@@ -140,21 +184,43 @@ export function buildGlobalSearchIndex({
     const sources: string[] = [];
     const verdicts: string[] = [];
     const summaries: string[] = [];
+    let bestLastSeenDisplay: string | undefined;
+    let bestLastSeenMs = -1;
+
     for (const r of rows) {
       tone = highestTone(tone, verdictToTone(r.verdict, r.status));
       if (r.source && !sources.includes(r.source)) sources.push(r.source);
       if (r.status === 'ok' && r.verdict) verdicts.push(`${r.source}: ${r.verdict}`);
       if (r.summary) summaries.push(r.summary);
+      const ls = extractResultLastSeen(r);
+      if (ls.epochMs !== null && ls.epochMs > bestLastSeenMs) {
+        bestLastSeenMs = ls.epochMs;
+        bestLastSeenDisplay = ls.displayUtc;
+      }
     }
+
     const primaryType = (rows[0]?.type || 'ioc').toUpperCase();
-    const topLabel =
-      tone === 'malicious'
-        ? 'Malicious'
-        : tone === 'suspicious'
-          ? 'Suspicious'
-          : tone === 'clean'
-            ? 'Clean'
-            : 'Unknown';
+    const topLabel = toneToVerdictLabel(tone);
+    const conf = currentConfidenceMap.get(indicator.toLowerCase());
+    const topRow = [...rows].sort((a, b) => {
+      const rank = (v: string) => (v === 'Malicious' ? 3 : v === 'Suspicious' ? 2 : v === 'Clean' ? 1 : 0);
+      return rank(b.verdict) - rank(a.verdict);
+    })[0];
+    const primaryScore = topRow?.score || undefined;
+    const snippet =
+      topRow?.summary?.trim() ||
+      (verdicts.length > 0 ? verdicts.join(' · ') : `${rows.length} provider lookup(s) completed`);
+
+    indicatorTelemetry.set(indicator.toLowerCase(), {
+      riskScore: conf?.confidenceScore ?? null,
+      riskLevel: conf?.riskLevel,
+      verdictLabel: topLabel,
+      primaryScore,
+      sources,
+      lastSeen: bestLastSeenDisplay,
+      snippet,
+      type: primaryType,
+    });
 
     entries.push({
       id: `inv-current:${indicator}`,
@@ -166,6 +232,16 @@ export function buildGlobalSearchIndex({
       searchText: `${indicator} ${primaryType} ${sources.join(' ')} ${verdicts.join(' ')} ${summaries.join(' ')}`.toLowerCase(),
       verdictTone: tone,
       indicator,
+      preview: {
+        indicatorType: primaryType,
+        verdictLabel: topLabel,
+        riskScore: conf?.confidenceScore ?? null,
+        riskLevel: conf?.riskLevel,
+        primaryScore,
+        sources,
+        lastSeen: bestLastSeenDisplay,
+        snippet,
+      },
     });
   }
 
@@ -182,8 +258,39 @@ export function buildGlobalSearchIndex({
     if (inv.verdictSummary.clean > 0) vParts.push(`${inv.verdictSummary.clean} clean`);
     if (vParts.length === 0) vParts.push(`${inv.results.length} results`);
 
+    const invConfMap = computeAllIocConfidenceScores(inv.results || []);
+    let peakScore: number | null = null;
+    let peakRiskLevel: string | undefined;
+    for (const entryConf of invConfMap.values()) {
+      if (entryConf.confidenceScore !== null && (peakScore === null || entryConf.confidenceScore > peakScore)) {
+        peakScore = entryConf.confidenceScore;
+        peakRiskLevel = entryConf.riskLevel;
+      }
+    }
+
+    for (const [k, entryConf] of invConfMap.entries()) {
+      if (!indicatorTelemetry.has(k)) {
+        const matchRow = (inv.results || []).find((r) => r.indicator.trim().toLowerCase() === k);
+        indicatorTelemetry.set(k, {
+          riskScore: entryConf.confidenceScore,
+          riskLevel: entryConf.riskLevel,
+          verdictLabel: matchRow?.verdict || toneToVerdictLabel(tone),
+          primaryScore: matchRow?.score || undefined,
+          sources: inv.sourceLabels,
+          lastSeen: inv.createdAt ? `${inv.createdAt.slice(0, 16).replace('T', ' ')} UTC` : undefined,
+          snippet: matchRow?.summary || `Observed in saved investigation (${vParts.join(' · ')})`,
+          type: (matchRow?.type || 'ioc').toUpperCase(),
+        });
+      }
+    }
+
     const invTags = Array.isArray(inv.tags) ? inv.tags.filter(Boolean) : [];
     const displayTitle = inv.customTitle && inv.customTitle.trim() ? inv.customTitle.trim() : title;
+    const createdDisplay = inv.createdAt ? `${inv.createdAt.slice(0, 16).replace('T', ' ')} UTC` : undefined;
+    const invSnippet = inv.notes?.trim()
+      ? inv.notes.trim()
+      : `${inv.indicatorCount || inv.indicators.length} IOCs enriched in ${inv.mode === 'live' ? 'Live API' : 'Sample'} mode (${vParts.join(', ')}).`;
+
     entries.push({
       id: `inv-history:${inv.id}`,
       tab: 'investigate',
@@ -195,6 +302,17 @@ export function buildGlobalSearchIndex({
       verdictTone: tone,
       historyEntryId: inv.id,
       indicator: inv.indicators[0],
+      preview: {
+        indicatorType: 'SESSION',
+        verdictLabel: toneToVerdictLabel(tone),
+        riskScore: peakScore,
+        riskLevel: peakRiskLevel,
+        primaryScore: vParts.join(' · '),
+        sources: inv.sourceLabels || [],
+        lastSeen: createdDisplay,
+        snippet: invSnippet,
+        tags: invTags.length > 0 ? invTags : undefined,
+      },
     });
   }
 
@@ -204,6 +322,8 @@ export function buildGlobalSearchIndex({
     const tone = verdictSummaryToTone(v);
     const indicators = Array.isArray(rep.indicators) ? rep.indicators : [];
     const runLabel = formatRunLabel(rep.name, rep.modifiedAt);
+    const evaluated = v.malicious + v.suspicious + v.clean;
+    const malShare = evaluated > 0 ? Math.round(((v.malicious + v.suspicious * 0.5) / evaluated) * 100) : null;
 
     entries.push({
       id: `report:${rep.name}`,
@@ -215,9 +335,25 @@ export function buildGlobalSearchIndex({
       searchText: `${rep.name} ${runLabel} ${indicators.join(' ')}`.toLowerCase(),
       verdictTone: tone,
       reportName: rep.name,
+      preview: {
+        indicatorType: 'CSV REPORT',
+        verdictLabel: toneToVerdictLabel(tone),
+        riskScore: malShare,
+        riskLevel:
+          malShare === null ? 'Unknown' : malShare >= 50 ? 'High' : malShare >= 25 ? 'Medium' : 'Low',
+        primaryScore: `${v.malicious} mal / ${v.suspicious} susp / ${v.clean} clean`,
+        sources: ['CSV Archive'],
+        lastSeen: runLabel,
+        snippet:
+          indicators.length > 0
+            ? `${rep.rowCount} lookup rows covering ${indicators.slice(0, 4).join(', ')}${indicators.length > 4 ? ` +${indicators.length - 4} more` : ''}`
+            : `${rep.rowCount} enrichment rows archived in ${rep.name}.`,
+      },
     });
 
     for (const ind of indicators) {
+      const telemetry = indicatorTelemetry.get(ind.trim().toLowerCase());
+      const iocTone = telemetry ? verdictToTone(telemetry.verdictLabel) : tone;
       entries.push({
         id: `report-ioc:${rep.name}:${ind}`,
         tab: 'reports',
@@ -226,9 +362,29 @@ export function buildGlobalSearchIndex({
         title: ind,
         subtitle: `In report ${rep.name} · ${runLabel}`,
         searchText: `${ind} ${rep.name} ${runLabel}`.toLowerCase(),
-        verdictTone: tone,
+        verdictTone: iocTone,
         reportName: rep.name,
         indicator: ind,
+        preview: telemetry
+          ? {
+              indicatorType: telemetry.type,
+              verdictLabel: telemetry.verdictLabel,
+              riskScore: telemetry.riskScore,
+              riskLevel: telemetry.riskLevel,
+              primaryScore: telemetry.primaryScore,
+              sources: telemetry.sources,
+              lastSeen: telemetry.lastSeen || runLabel,
+              snippet: telemetry.snippet,
+            }
+          : {
+              indicatorType: 'IOC',
+              verdictLabel: toneToVerdictLabel(tone),
+              riskScore: malShare,
+              primaryScore: `${v.malicious} mal / ${v.clean} clean in run`,
+              sources: [rep.name],
+              lastSeen: runLabel,
+              snippet: `Indicator recorded inside ${rep.name} (${rep.rowCount} rows total).`,
+            },
       });
     }
   }
@@ -255,6 +411,17 @@ export function buildGlobalSearchIndex({
       verdictTone: tone,
       scheduleId: job.id,
       indicator: job.indicators[0],
+      preview: {
+        indicatorType: 'SCHEDULE',
+        verdictLabel: job.enabled ? 'Active' : 'Paused',
+        riskScore: null,
+        primaryScore: `${job.runCount} run${job.runCount === 1 ? '' : 's'} · ${formatIntervalLabel(job.intervalMinutes)}`,
+        sources: job.sources,
+        lastSeen: job.lastRunAt ? `${job.lastRunAt.slice(0, 16).replace('T', ' ')} UTC` : 'Not yet run',
+        snippet:
+          job.lastSummary?.trim() ||
+          `Monitors ${job.indicators.join(', ')} in ${job.mode === 'live' ? 'Live API' : 'Sample'} mode.`,
+      },
     });
   }
 
@@ -268,6 +435,8 @@ export function buildGlobalSearchIndex({
       : upper.includes('WARN')
         ? 'suspicious'
         : 'neutral';
+    const levelLabel = upper.includes('ERROR') ? 'Error' : upper.includes('WARN') ? 'Warning' : 'Info';
+    const tsMatch = line.match(/\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}/);
 
     entries.push({
       id: `log:${i}:${line.slice(0, 24)}`,
@@ -279,6 +448,14 @@ export function buildGlobalSearchIndex({
       searchText: line.toLowerCase(),
       verdictTone: tone,
       logQuery: line,
+      preview: {
+        indicatorType: 'LOG EVENT',
+        verdictLabel: levelLabel,
+        riskScore: null,
+        sources: ['logs/soti.log'],
+        lastSeen: tsMatch ? tsMatch[0] : undefined,
+        snippet: line.trim(),
+      },
     });
   }
 
@@ -296,6 +473,14 @@ export function buildGlobalSearchIndex({
       searchText: `${core.name} ${core.id} ${core.envVar} ${core.support} ${cfg?.baseUrl || ''}`.toLowerCase(),
       verdictTone: enabled ? 'clean' : 'neutral',
       providerId: core.id,
+      preview: {
+        indicatorType: 'PROVIDER',
+        verdictLabel: enabled ? 'Enabled' : 'Disabled',
+        riskScore: null,
+        primaryScore: core.support,
+        sources: [core.envVar],
+        snippet: `Core enrichment provider supporting ${core.support}${cfg?.baseUrl ? ` · ${cfg.baseUrl}` : ''}.`,
+      },
     });
   }
 
@@ -312,6 +497,14 @@ export function buildGlobalSearchIndex({
       searchText: `${meta.name} ${id} ${meta.envVar} ${meta.support} ${cfg?.baseUrl || ''}`.toLowerCase(),
       verdictTone: enabled ? 'clean' : 'neutral',
       providerId: id,
+      preview: {
+        indicatorType: 'PROVIDER',
+        verdictLabel: enabled ? 'Enabled' : 'Disabled',
+        riskScore: null,
+        primaryScore: meta.support,
+        sources: [meta.envVar],
+        snippet: `Extended threat intelligence provider supporting ${meta.support}.`,
+      },
     });
   }
 
@@ -329,6 +522,14 @@ export function buildGlobalSearchIndex({
       searchText: `${custom.name} ${custom.id} ${custom.envVarName || ''} ${custom.endpointTemplate || ''} ${supportedList}`.toLowerCase(),
       verdictTone: custom.enabled ? 'clean' : 'neutral',
       providerId: custom.id,
+      preview: {
+        indicatorType: 'CUSTOM API',
+        verdictLabel: custom.enabled ? 'Enabled' : 'Disabled',
+        riskScore: null,
+        primaryScore: supportedList,
+        sources: [custom.envVarName || 'Custom Auth'],
+        snippet: `Custom REST feed${custom.endpointTemplate ? ` · ${custom.endpointTemplate}` : ''}.`,
+      },
     });
   }
 

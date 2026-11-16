@@ -25,6 +25,8 @@ import {
   type LiveActivityEvent,
 } from '../utils/liveActivity';
 import type { ReportMeta } from '../utils/reportsAnalytics';
+import { maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 interface LiveActivityFeedProps {
   reports?: ReportMeta[];
@@ -88,6 +90,7 @@ export function LiveActivityFeed({
   onInspectIndicator,
   onSelectReport,
 }: LiveActivityFeedProps) {
+  const privacyMode = usePrivacyMode();
   const [serverEvents, setServerEvents] = useState<LiveActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [streamingEnabled, setStreamingEnabled] = useState(true);
@@ -330,7 +333,7 @@ export function LiveActivityFeed({
                   <div className="min-w-0 space-y-0.5">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                       <span className="font-semibold text-slate-900 dark:text-slate-100">
-                        {ev.title}
+                        {maskSensitiveText(ev.title, privacyMode)}
                       </span>
                       <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
                       <span className={`font-medium ${getSeverityTextClass(ev.severity)}`}>
@@ -346,7 +349,7 @@ export function LiveActivityFeed({
                       )}
                     </div>
                     <p className="text-xs text-slate-600 dark:text-slate-400 break-words">
-                      {ev.detail}
+                      {maskSensitiveText(ev.detail, privacyMode)}
                     </p>
                   </div>
                 </div>

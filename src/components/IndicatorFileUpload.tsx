@@ -89,7 +89,7 @@ export function IndicatorFileUpload({
             </span>
             <span className="hidden sm:inline text-slate-500 dark:text-slate-400">
               {' '}
-              — parsed locally in your browser to populate the input field above
+              — parsed locally in your browser and loaded into the Bulk Investigation input
             </span>
           </div>
         </div>
@@ -128,7 +128,7 @@ export function IndicatorFileUpload({
               {summary.parsed.validCount === 1 ? '' : 's'}
             </span>
             <span>
-              from {summary.fileName} ({(summary.parsed.sourceFormat || 'csv').toUpperCase()})
+              from {summary.fileName} ({(summary.parsed.sourceFormat || 'csv').toUpperCase()}) → Bulk Investigation input
             </span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">

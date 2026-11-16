@@ -5,6 +5,8 @@ import {
   CalendarClock,
   ChevronDown,
   Download,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   HelpCircle,
   History,
@@ -17,15 +19,20 @@ import {
   SlidersHorizontal,
   StickyNote,
   Sun,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
   buildTopBarApiStatuses,
+  classifyLatencyTier,
   cloneDefaultApiSettings,
+  formatLatencyMs,
   summarizeTopBarApiGroup,
   type ApiKeyStatus,
   type ApiSettings,
   type BuiltinExtraSourceId,
+  type ProviderLatencySnapshot,
+  type ProviderLatencyTier,
   type TopBarProviderStatusItem,
   type TopBarProviderStatusState,
 } from '../utils/apiConfig';
@@ -36,6 +43,7 @@ import {
   type SearchableTab,
   type VerdictTone,
 } from '../utils/globalSearch';
+import { maskSensitiveText } from '../utils/privacyMode';
 import type { ThemeMode } from '../utils/theme';
 
 export type ActiveTab = 'investigate' | 'reports' | 'scheduled' | 'logs' | 'cli';
@@ -49,7 +57,9 @@ interface TopBarProps {
   customKeyStatus?: Record<string, boolean>;
   apiSettings?: ApiSettings;
   connectionOverrides?: Record<string, boolean | undefined>;
-  onTestProvider?: (providerId: string) => Promise<{ ok: boolean; message?: string }>;
+  providerLatencies?: Record<string, ProviderLatencySnapshot>;
+  lastApiLatency?: ProviderLatencySnapshot | null;
+  onTestProvider?: (providerId: string) => Promise<{ ok: boolean; message?: string; latencyMs?: number }>;
   onOpenHelp: () => void;
   theme: ThemeMode;
   onToggleTheme: () => void;
@@ -57,6 +67,8 @@ interface TopBarProps {
   notificationsOpen: boolean;
   onToggleNotifications: () => void;
   searchEntries: GlobalSearchEntry[];
+  recentHistoryCount?: number;
+  onClearRecentHistory?: () => void;
   searchFocusNonce?: number;
   onSearchFocus?: () => void;
   onOpenShortcuts?: () => void;
@@ -64,6 +76,8 @@ interface TopBarProps {
   quickNotesOpen?: boolean;
   quickNotesHasContent?: boolean;
   onToggleQuickNotes?: () => void;
+  privacyMode?: boolean;
+  onTogglePrivacyMode?: () => void;
 }
 
 const NAV_ITEMS: { id: ActiveTab; label: string }[] = [
@@ -114,6 +128,28 @@ function getStatusBadgeTextClass(item: TopBarProviderStatusItem): string {
   }
 }
 
+function getLatencyToneClass(tier: ProviderLatencyTier): string {
+  switch (tier) {
+    case 'slow':
+      return 'text-red-700 dark:text-red-400';
+    case 'moderate':
+      return 'text-amber-700 dark:text-amber-400';
+    case 'fast':
+      return 'text-emerald-700 dark:text-emerald-400';
+  }
+}
+
+function getLatencyTierLabel(tier: ProviderLatencyTier): string {
+  switch (tier) {
+    case 'slow':
+      return 'Slow';
+    case 'moderate':
+      return 'Moderate';
+    case 'fast':
+      return 'Fast';
+  }
+}
+
 const SEARCH_TAB_FILTERS: { id: 'all' | SearchableTab; label: string }[] = [
   { id: 'all', label: 'All' },
   { id: 'investigate', label: 'Investigate' },
@@ -153,6 +189,25 @@ function getToneAccentClass(tone?: VerdictTone): string {
   }
 }
 
+function getPreviewDotClass(tone?: VerdictTone): string {
+  switch (tone) {
+    case 'malicious':
+      return 'bg-red-600 dark:bg-red-500';
+    case 'suspicious':
+      return 'bg-amber-500 dark:bg-amber-400';
+    case 'clean':
+      return 'bg-emerald-600 dark:bg-emerald-500';
+    default:
+      return 'bg-slate-400 dark:bg-slate-500';
+  }
+}
+
+function getRiskBarFillClass(score: number): string {
+  if (score >= 70) return 'bg-red-600 dark:bg-red-500';
+  if (score >= 40) return 'bg-amber-500 dark:bg-amber-400';
+  return 'bg-emerald-600 dark:bg-emerald-500';
+}
+
 export function TopBar({
   activeTab,
   onSelectTab,
@@ -162,6 +217,8 @@ export function TopBar({
   customKeyStatus = {},
   apiSettings,
   connectionOverrides = {},
+  providerLatencies = {},
+  lastApiLatency = null,
   onTestProvider,
   onOpenHelp,
   theme,
@@ -170,6 +227,8 @@ export function TopBar({
   notificationsOpen,
   onToggleNotifications,
   searchEntries,
+  recentHistoryCount = 0,
+  onClearRecentHistory,
   searchFocusNonce = 0,
   onSearchFocus,
   onOpenShortcuts,
@@ -177,15 +236,23 @@ export function TopBar({
   quickNotesOpen = false,
   quickNotesHasContent = false,
   onToggleQuickNotes,
+  privacyMode = false,
+  onTogglePrivacyMode,
 }: TopBarProps) {
   const isDark = theme === 'dark';
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [tabFilter, setTabFilter] = useState<'all' | SearchableTab>('all');
   const [activeIndex, setActiveIndex] = useState(0);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [keyboardPreviewActive, setKeyboardPreviewActive] = useState(false);
+  const [historyClearedNotice, setHistoryClearedNotice] = useState(false);
+  const clearNoticeTimerRef = useRef<number | null>(null);
   const [apiPopoverOpen, setApiPopoverOpen] = useState(false);
   const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
   const [testMessages, setTestMessages] = useState<Record<string, { ok: boolean; text: string }>>({});
+
+  const lastLatencyTier = lastApiLatency ? classifyLatencyTier(lastApiLatency.latencyMs) : null;
 
   const resolvedSettings = useMemo(
     () => apiSettings ?? cloneDefaultApiSettings(),
@@ -240,7 +307,32 @@ export function TopBar({
 
   useEffect(() => {
     setActiveIndex(0);
+    setHoveredIndex(null);
+    setKeyboardPreviewActive(false);
   }, [searchQuery, tabFilter, filteredResults.length]);
+
+  useEffect(() => {
+    if (!searchOpen) {
+      setHoveredIndex(null);
+      setKeyboardPreviewActive(false);
+      setHistoryClearedNotice(false);
+    }
+  }, [searchOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (clearNoticeTimerRef.current !== null) {
+        window.clearTimeout(clearNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const previewEntry: GlobalSearchEntry | null =
+    hoveredIndex !== null && filteredResults[hoveredIndex]
+      ? filteredResults[hoveredIndex]
+      : keyboardPreviewActive && filteredResults[activeIndex]
+        ? filteredResults[activeIndex]
+        : null;
 
   useEffect(() => {
     setSearchOpen(false);
@@ -321,6 +413,8 @@ export function TopBar({
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       setSearchOpen(true);
+      setHoveredIndex(null);
+      setKeyboardPreviewActive(true);
       setActiveIndex((prev) =>
         filteredResults.length > 0 ? (prev + 1) % filteredResults.length : 0,
       );
@@ -329,6 +423,8 @@ export function TopBar({
     if (event.key === 'ArrowUp') {
       event.preventDefault();
       setSearchOpen(true);
+      setHoveredIndex(null);
+      setKeyboardPreviewActive(true);
       setActiveIndex((prev) =>
         filteredResults.length > 0
           ? (prev - 1 + filteredResults.length) % filteredResults.length
@@ -347,7 +443,7 @@ export function TopBar({
 
   return (
     <header className="relative z-40 md:sticky md:top-0 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-950/90 backdrop-blur transition-colors">
-      <div className="mx-auto flex max-w-[1360px] flex-wrap items-center justify-between gap-y-2 gap-x-2 px-3 py-2.5 sm:px-4 md:flex-nowrap md:gap-2 xl:gap-2.5 md:px-4 xl:px-5 md:py-3">
+      <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-y-2 gap-x-2 px-3 py-2.5 sm:px-4 md:flex-nowrap md:gap-1.5 xl:gap-2 md:px-4 xl:px-5 md:py-3">
         <a
           href="#investigate"
           onClick={(e) => {
@@ -361,7 +457,7 @@ export function TopBar({
 
         <nav
           aria-label="Primary"
-          className="order-4 flex w-full items-center justify-between gap-1.5 border-t border-slate-100 dark:border-slate-800 pt-2 md:order-none md:w-auto md:justify-start md:gap-2 xl:gap-3 md:border-t-0 md:pt-0"
+          className="order-4 flex w-full items-center justify-between gap-1.5 border-t border-slate-100 dark:border-slate-800 pt-2 md:order-none md:w-auto md:justify-start md:gap-2 xl:gap-2.5 md:border-t-0 md:pt-0"
         >
           {NAV_ITEMS.map((item) => {
             const isActive = activeTab === item.id;
@@ -384,7 +480,7 @@ export function TopBar({
 
         <div
           ref={searchContainerRef}
-          className="order-2 relative w-full md:order-none md:w-32 lg:w-36 xl:w-40 shrink-0"
+          className="order-2 relative w-full md:order-none md:w-28 lg:w-32 xl:w-36 2xl:w-44 shrink"
         >
           <div className="relative flex items-center">
             <Search
@@ -438,33 +534,73 @@ export function TopBar({
           {searchOpen && (
             <div
               data-testid="global-search-results"
-              className="absolute left-0 right-0 md:left-auto md:right-0 md:w-[460px] lg:w-[520px] top-full mt-2 z-50 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl overflow-hidden"
+              className="absolute left-0 right-0 top-full mt-2 md:-left-24 md:right-auto md:w-[min(660px,calc(100vw-32px))] lg:left-0 lg:w-[700px] z-50 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden"
             >
-              <div
-                role="tablist"
-                aria-label="Filter global search by tab"
-                className="flex flex-wrap items-center gap-1 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 px-2.5 py-2"
-              >
-                {SEARCH_TAB_FILTERS.map((tabOpt) => {
-                  const active = tabFilter === tabOpt.id;
-                  return (
-                    <button
-                      key={tabOpt.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
-                      data-testid={`global-search-filter-${tabOpt.id}`}
-                      onClick={() => setTabFilter(tabOpt.id)}
-                      className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        active
-                          ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-slate-50 shadow-xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
-                      }`}
-                    >
-                      {tabOpt.label}
-                    </button>
-                  );
-                })}
+              <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 px-2.5 py-2">
+                <div
+                  role="tablist"
+                  aria-label="Filter global search by tab"
+                  className="flex flex-wrap items-center gap-1"
+                >
+                  {SEARCH_TAB_FILTERS.map((tabOpt) => {
+                    const active = tabFilter === tabOpt.id;
+                    return (
+                      <button
+                        key={tabOpt.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        data-testid={`global-search-filter-${tabOpt.id}`}
+                        onClick={() => setTabFilter(tabOpt.id)}
+                        className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          active
+                            ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-slate-50 shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                        }`}
+                      >
+                        {tabOpt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {onClearRecentHistory && (
+                  <button
+                    type="button"
+                    data-testid="global-search-clear-history-btn"
+                    disabled={recentHistoryCount === 0}
+                    onClick={() => {
+                      onClearRecentHistory();
+                      setHistoryClearedNotice(true);
+                      if (clearNoticeTimerRef.current !== null) {
+                        window.clearTimeout(clearNoticeTimerRef.current);
+                      }
+                      clearNoticeTimerRef.current = window.setTimeout(() => {
+                        setHistoryClearedNotice(false);
+                      }, 2600);
+                      searchInputRef.current?.focus();
+                    }}
+                    aria-label={
+                      recentHistoryCount > 0
+                        ? `Clear ${recentHistoryCount} recent history ${recentHistoryCount === 1 ? 'entry' : 'entries'} from local storage`
+                        : 'No recent history entries to clear'
+                    }
+                    title={
+                      recentHistoryCount > 0
+                        ? `Clear ${recentHistoryCount} recent history ${recentHistoryCount === 1 ? 'entry' : 'entries'} from local storage`
+                        : 'Recent history index is already clean'
+                    }
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 transition-colors hover:border-red-300 hover:text-red-700 dark:hover:border-red-800 dark:hover:text-red-400 disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Trash2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span>Clear</span>
+                    {recentHistoryCount > 0 && (
+                      <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 tabular-nums">
+                        ({recentHistoryCount})
+                      </span>
+                    )}
+                  </button>
+                )}
               </div>
 
               {filteredResults.length === 0 ? (
@@ -477,62 +613,214 @@ export function TopBar({
                   </p>
                 </div>
               ) : (
-                <ul
-                  id="global-search-listbox"
-                  role="listbox"
-                  aria-label="Global search results"
-                  className="max-h-[340px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800"
-                >
-                  {filteredResults.map((entry, idx) => {
-                    const isHighlighted = idx === activeIndex;
-                    return (
-                      <li key={entry.id} role="option" aria-selected={isHighlighted}>
-                        <button
-                          type="button"
-                          data-testid="global-search-item"
-                          data-tab={entry.tab}
-                          onMouseEnter={() => setActiveIndex(idx)}
-                          onClick={() => handleSelectEntry(entry)}
-                          className={`flex w-full items-start gap-2.5 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
-                            isHighlighted
-                              ? 'bg-slate-100 dark:bg-slate-800/80'
-                              : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                          }`}
-                        >
-                          <div className="mt-0.5">
-                            <KindIcon kind={entry.kind} />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline justify-between gap-2">
+                <div className="md:grid md:grid-cols-[minmax(0,1fr)_275px] lg:grid-cols-[minmax(0,1fr)_295px]">
+                  <ul
+                    id="global-search-listbox"
+                    role="listbox"
+                    aria-label="Global search results"
+                    onMouseLeave={() => setHoveredIndex(null)}
+                    className="max-h-[340px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800"
+                  >
+                    {filteredResults.map((entry, idx) => {
+                      const isHighlighted =
+                        hoveredIndex !== null
+                          ? idx === hoveredIndex
+                          : keyboardPreviewActive
+                            ? idx === activeIndex
+                            : false;
+                      return (
+                        <li key={entry.id} role="option" aria-selected={isHighlighted}>
+                          <button
+                            type="button"
+                            data-testid="global-search-item"
+                            data-tab={entry.tab}
+                            onMouseEnter={() => {
+                              setHoveredIndex(idx);
+                              setActiveIndex(idx);
+                            }}
+                            onFocus={() => {
+                              setHoveredIndex(idx);
+                              setActiveIndex(idx);
+                            }}
+                            onClick={() => handleSelectEntry(entry)}
+                            className={`flex w-full items-start gap-2.5 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+                              isHighlighted
+                                ? 'bg-slate-100 dark:bg-slate-800/80'
+                                : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                            }`}
+                          >
+                            <div className="mt-0.5">
+                              <KindIcon kind={entry.kind} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span
+                                  className={`truncate font-mono text-xs font-semibold ${
+                                    entry.kind === 'ioc' || entry.kind === 'report'
+                                      ? 'text-slate-950 dark:text-slate-50'
+                                      : 'font-sans text-slate-900 dark:text-slate-100'
+                                  }`}
+                                >
+                                  {maskSensitiveText(entry.title, privacyMode)}
+                                </span>
+                                <span
+                                  className={`text-[11px] font-medium whitespace-nowrap shrink-0 ${getToneAccentClass(entry.verdictTone)}`}
+                                >
+                                  {entry.tabLabel}
+                                </span>
+                              </div>
+                              <p className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                                {maskSensitiveText(entry.subtitle, privacyMode)}
+                              </p>
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
+                  <aside
+                    aria-label="Search entry risk preview"
+                    className="hidden md:flex flex-col justify-between border-l border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-3.5 min-h-[240px] max-h-[340px] overflow-y-auto"
+                  >
+                    {previewEntry ? (
+                      <div data-testid="global-search-preview" className="space-y-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="inline-flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
                               <span
-                                className={`truncate font-mono text-xs font-semibold ${
-                                  entry.kind === 'ioc' || entry.kind === 'report'
-                                    ? 'text-slate-950 dark:text-slate-50'
-                                    : 'font-sans text-slate-900 dark:text-slate-100'
-                                }`}
-                              >
-                                {entry.title}
+                                aria-hidden="true"
+                                className={`h-2 w-2 rounded-full shrink-0 ${getPreviewDotClass(previewEntry.verdictTone)}`}
+                              />
+                              <span className={getToneAccentClass(previewEntry.verdictTone)}>
+                                {previewEntry.preview.verdictLabel}
+                              </span>
+                            </span>
+                            <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                              {previewEntry.preview.indicatorType || previewEntry.kind.toUpperCase()} · {previewEntry.tabLabel}
+                            </span>
+                          </div>
+                          <div className="font-mono text-xs font-bold text-slate-950 dark:text-slate-50 break-all">
+                            {maskSensitiveText(previewEntry.title, privacyMode)}
+                          </div>
+                        </div>
+
+                        {previewEntry.preview.riskScore !== null && (
+                          <div className="space-y-1 rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 px-2.5 py-2">
+                            <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                              <span className="text-slate-500 dark:text-slate-400 font-medium">
+                                Risk Score
                               </span>
                               <span
-                                className={`text-[11px] font-medium whitespace-nowrap shrink-0 ${getToneAccentClass(entry.verdictTone)}`}
+                                data-testid="global-search-preview-score"
+                                className={`font-mono font-bold tabular-nums ${getToneAccentClass(previewEntry.verdictTone)}`}
                               >
-                                {entry.tabLabel}
+                                {previewEntry.preview.riskScore}/100
+                                {previewEntry.preview.riskLevel ? ` · ${previewEntry.preview.riskLevel}` : ''}
                               </span>
                             </div>
-                            <p className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
-                              {entry.subtitle}
-                            </p>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                              <div
+                                className={`h-full rounded-full ${getRiskBarFillClass(previewEntry.preview.riskScore)}`}
+                                style={{ width: `${Math.min(100, Math.max(4, previewEntry.preview.riskScore))}%` }}
+                              />
+                            </div>
                           </div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
+                        )}
+
+                        <dl className="space-y-1.5 text-[11px] border-t border-slate-200/70 dark:border-slate-800 pt-2.5">
+                          {previewEntry.preview.primaryScore && (
+                            <div className="flex items-baseline justify-between gap-2">
+                              <dt className="text-slate-500 dark:text-slate-400 shrink-0">Metric</dt>
+                              <dd className="font-mono font-medium text-slate-900 dark:text-slate-100 text-right truncate tabular-nums">
+                                {maskSensitiveText(previewEntry.preview.primaryScore, privacyMode)}
+                              </dd>
+                            </div>
+                          )}
+                          {previewEntry.preview.sources.length > 0 && (
+                            <div className="flex items-baseline justify-between gap-2">
+                              <dt className="text-slate-500 dark:text-slate-400 shrink-0">Sources</dt>
+                              <dd className="font-medium text-slate-800 dark:text-slate-200 text-right truncate">
+                                {previewEntry.preview.sources.slice(0, 3).join(', ')}
+                                {previewEntry.preview.sources.length > 3
+                                  ? ` +${previewEntry.preview.sources.length - 3}`
+                                  : ''}
+                              </dd>
+                            </div>
+                          )}
+                          {previewEntry.preview.lastSeen && (
+                            <div className="flex items-baseline justify-between gap-2">
+                              <dt className="text-slate-500 dark:text-slate-400 shrink-0">Observed</dt>
+                              <dd className="font-mono text-[10px] text-slate-700 dark:text-slate-300 text-right tabular-nums">
+                                {previewEntry.preview.lastSeen}
+                              </dd>
+                            </div>
+                          )}
+                          {previewEntry.preview.tags && previewEntry.preview.tags.length > 0 && (
+                            <div className="flex items-baseline justify-between gap-2">
+                              <dt className="text-slate-500 dark:text-slate-400 shrink-0">Tags</dt>
+                              <dd className="text-slate-700 dark:text-slate-300 text-right truncate">
+                                {previewEntry.preview.tags.join(' · ')}
+                              </dd>
+                            </div>
+                          )}
+                        </dl>
+
+                        <div className="border-t border-slate-200/70 dark:border-slate-800 pt-2">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                            Preview
+                          </div>
+                          <p
+                            data-testid="global-search-preview-snippet"
+                            className="mt-1 text-[11px] leading-relaxed text-slate-700 dark:text-slate-300 line-clamp-4"
+                          >
+                            {maskSensitiveText(previewEntry.preview.snippet, privacyMode)}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="my-auto py-6 text-center space-y-1.5">
+                        <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Risk Metadata Preview
+                        </p>
+                        <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                          Hover over any search entry or step with ↑↓ arrows to inspect verdict, risk score, and finding summary.
+                        </p>
+                      </div>
+                    )}
+                  </aside>
+                </div>
+              )}
+
+              {previewEntry && (
+                <div
+                  data-testid="global-search-preview-mobile"
+                  className="md:hidden border-t border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/80 px-3 py-2 space-y-1"
+                >
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className={`font-semibold ${getToneAccentClass(previewEntry.verdictTone)}`}>
+                      {previewEntry.preview.verdictLabel}
+                      {previewEntry.preview.riskScore !== null
+                        ? ` · ${previewEntry.preview.riskScore}/100`
+                        : ''}
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                      {previewEntry.preview.sources.slice(0, 2).join(', ')}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-700 dark:text-slate-300 line-clamp-2">
+                    {maskSensitiveText(previewEntry.preview.snippet, privacyMode)}
+                  </p>
+                </div>
               )}
 
               <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 px-3 py-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                <span>Supports defanged IOCs (e.g. 1[.]2[.]3[.]4)</span>
-                <span className="hidden sm:inline font-mono">↑↓ Navigate · Enter Open · Esc Close</span>
+                <span data-testid="global-search-footer-status">
+                  {historyClearedNotice
+                    ? 'Recent search history cleared from local storage'
+                    : 'Hover to preview · Click to navigate'}
+                </span>
+                <span className="hidden sm:inline font-mono">↑↓ Preview · Enter Open · Esc Close</span>
               </div>
             </div>
           )}
@@ -583,7 +871,7 @@ export function TopBar({
                 data-testid="api-status-group-extra"
                 title={`Other APIs: ${extraApiStatuses.map((e) => `${e.fullLabel} (${e.statusLabel})`).join(' · ')}`}
               >
-                <span className="xl:hidden text-[10px] text-slate-500 dark:text-slate-400">
+                <span className="2xl:hidden text-[10px] text-slate-500 dark:text-slate-400">
                   Other
                 </span>
                 {extraApiStatuses.map((item) => (
@@ -599,7 +887,7 @@ export function TopBar({
                       aria-hidden="true"
                       className={`h-2 w-2 rounded-full shrink-0 ${getProviderDotClass(item)}`}
                     />
-                    <span className="hidden xl:inline">{item.shortLabel}</span>
+                    <span className="hidden 2xl:inline">{item.shortLabel}</span>
                   </span>
                 ))}
               </span>
@@ -670,6 +958,21 @@ export function TopBar({
                 )}
               </span>
 
+              {lastApiLatency && lastLatencyTier && (
+                <>
+                  <span className="h-3 w-px bg-slate-200 dark:bg-slate-700 shrink-0" aria-hidden="true" />
+                  <span
+                    data-testid="topbar-api-latency"
+                    data-provider={lastApiLatency.providerId}
+                    data-tier={lastLatencyTier}
+                    title={`Last API test: ${lastApiLatency.providerLabel} · ${formatLatencyMs(lastApiLatency.latencyMs)} (${getLatencyTierLabel(lastLatencyTier)})`}
+                    className={`inline-flex items-center font-mono text-[10px] font-semibold tabular-nums whitespace-nowrap shrink-0 ${getLatencyToneClass(lastLatencyTier)}`}
+                  >
+                    {formatLatencyMs(lastApiLatency.latencyMs)}
+                  </span>
+                </>
+              )}
+
               <ChevronDown
                 className={`h-3 w-3 shrink-0 text-slate-400 transition-transform ${
                   apiPopoverOpen ? 'rotate-180' : ''
@@ -693,6 +996,22 @@ export function TopBar({
                     <p className="text-[11px] text-slate-500 dark:text-slate-400">
                       Core ({coreApiStatuses.filter((i) => i.status === 'connected').length}/{coreApiStatuses.length}) · Other ({extraSummary.connectedCount}/{extraSummary.total}) · Custom ({customSummary.connectedCount}/{customSummary.total})
                     </p>
+                    {lastApiLatency && lastLatencyTier && (
+                      <p
+                        data-testid="popover-last-api-latency"
+                        className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400 tabular-nums"
+                      >
+                        Last test:{' '}
+                        <span className="font-medium text-slate-700 dark:text-slate-200">
+                          {lastApiLatency.providerLabel}
+                        </span>{' '}
+                        ·{' '}
+                        <span className={`font-mono font-semibold ${getLatencyToneClass(lastLatencyTier)}`}>
+                          {formatLatencyMs(lastApiLatency.latencyMs)}
+                          {lastLatencyTier === 'slow' ? ' (Slow)' : ''}
+                        </span>
+                      </p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -725,6 +1044,10 @@ export function TopBar({
                         <ul className="space-y-1.5">
                           {section.items.map((item) => {
                             const lastMsg = testMessages[item.id];
+                            const rowLatency = providerLatencies[item.id];
+                            const rowLatencyTier = rowLatency
+                              ? classifyLatencyTier(rowLatency.latencyMs)
+                              : null;
                             const isTesting = testingProviderId === item.id;
                             return (
                               <li
@@ -749,6 +1072,17 @@ export function TopBar({
                                     <span className={`font-semibold ${getStatusBadgeTextClass(item)}`}>
                                       {item.statusLabel}
                                     </span>
+                                    {rowLatency && rowLatencyTier && (
+                                      <span
+                                        data-testid={`popover-api-latency-${item.id}`}
+                                        data-tier={rowLatencyTier}
+                                        title={`Last test latency: ${formatLatencyMs(rowLatency.latencyMs)} (${getLatencyTierLabel(rowLatencyTier)})`}
+                                        className={`font-mono font-semibold tabular-nums whitespace-nowrap shrink-0 ${getLatencyToneClass(rowLatencyTier)}`}
+                                      >
+                                        · {formatLatencyMs(rowLatency.latencyMs)}
+                                        {rowLatencyTier === 'slow' ? ' Slow' : ''}
+                                      </span>
+                                    )}
                                     {lastMsg && (
                                       <span
                                         className={`truncate ${
@@ -879,6 +1213,37 @@ export function TopBar({
                   className="ml-1 h-1.5 w-1.5 rounded-full bg-amber-500"
                 />
               )}
+            </button>
+          )}
+
+          {onTogglePrivacyMode && (
+            <button
+              type="button"
+              onClick={onTogglePrivacyMode}
+              data-testid="privacy-mode-toggle"
+              aria-pressed={privacyMode}
+              aria-label={
+                privacyMode
+                  ? 'Disable Privacy Mode (unmask sensitive IOCs)'
+                  : 'Enable Privacy Mode (mask sensitive IOCs)'
+              }
+              title={
+                privacyMode
+                  ? 'Privacy Mode ON — sensitive IOCs are masked for demos'
+                  : 'Privacy Mode — mask IPs, domains, URLs & hashes for presentations'
+              }
+              className={`inline-flex items-center gap-1 rounded-lg border p-1.5 sm:px-2 sm:py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200 ${
+                privacyMode
+                  ? 'border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300'
+                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-950 dark:hover:text-white'
+              }`}
+            >
+              {privacyMode ? (
+                <EyeOff className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+              ) : (
+                <Eye className="h-3.5 w-3.5 text-slate-600 dark:text-slate-300 shrink-0" aria-hidden="true" />
+              )}
+              <span className="hidden 2xl:inline">{privacyMode ? 'Masked' : 'Privacy'}</span>
             </button>
           )}
 

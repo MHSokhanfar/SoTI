@@ -13,7 +13,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { ALL_SOURCE_IDS } from '../utils/apiConfig';
-import { parseIndicators, type SourceId } from '../utils/indicators';
+import { parseIndicators, type LookupResult, type SourceId } from '../utils/indicators';
 import {
   buildCliAddScheduleCommand,
   formatIntervalLabel,
@@ -25,6 +25,8 @@ import {
 } from '../utils/scheduler';
 import type { EmailAlertRecord } from '../utils/emailAlerts';
 import type { QuotaState } from '../App';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 export interface ScheduledNavigationTarget {
   scheduleId?: string | null;
@@ -36,6 +38,11 @@ interface ScheduledViewProps {
   onReportCreated?: (filename: string) => void;
   onQuotaChange?: (next: QuotaState) => void;
   onEmailAlertTriggered?: (record: EmailAlertRecord) => void;
+  onEvaluateAlertRules?: (
+    results: readonly LookupResult[],
+    mode: 'sample' | 'live',
+    reportFile?: string | null,
+  ) => void;
   navigationTarget?: ScheduledNavigationTarget | null;
 }
 
@@ -51,8 +58,10 @@ export function ScheduledView({
   onReportCreated,
   onQuotaChange,
   onEmailAlertTriggered,
+  onEvaluateAlertRules,
   navigationTarget,
 }: ScheduledViewProps) {
+  const privacyMode = usePrivacyMode();
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -224,6 +233,9 @@ export function ScheduledView({
       if (data.emailAlert?.triggered && data.emailAlert?.record) {
         onEmailAlertTriggered?.(data.emailAlert.record);
       }
+      if (Array.isArray(data.results)) {
+        onEvaluateAlertRules?.(data.results, job.mode, data.reportFile ?? null);
+      }
       await loadJobs(false);
       setFeedback({
         type: 'ok',
@@ -359,7 +371,7 @@ export function ScheduledView({
           ) : (
             <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
           )}
-          <span>{feedback.text}</span>
+          <span>{maskSensitiveText(feedback.text, privacyMode)}</span>
         </div>
       )}
 
@@ -469,7 +481,7 @@ export function ScheduledView({
                   {parsedPreview.map((tok, idx) => (
                     <span key={`${tok.original}-${idx}`} className="font-mono">
                       <span className={tok.type ? 'text-slate-900 dark:text-slate-100 font-semibold' : 'text-red-600 dark:text-red-400 line-through'}>
-                        {tok.cleaned}
+                        {maskIndicatorValue(tok.cleaned, tok.type, privacyMode)}
                       </span>{' '}
                       <span className="text-slate-400 dark:text-slate-500">/ {tok.type ?? 'invalid'}</span>
                     </span>
@@ -528,7 +540,7 @@ export function ScheduledView({
                 <span>Equivalent CLI command</span>
               </div>
               <code className="mt-1 block overflow-x-auto font-mono text-[11px] text-slate-200 whitespace-nowrap">
-                {cliCommandPreview}
+                {maskSensitiveText(cliCommandPreview, privacyMode)}
               </code>
             </div>
 
@@ -612,7 +624,7 @@ export function ScheduledView({
                           </span>
                         </div>
                         <div className="mt-1 font-mono text-[11px] text-slate-700 dark:text-slate-300">
-                          {job.indicators.join(', ')}
+                          {job.indicators.map((ind) => maskIndicatorValue(ind, null, privacyMode)).join(', ')}
                         </div>
                         <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                           Sources: {job.sources.map((s) => SOURCE_NAMES[s] || s).join(' · ')}
@@ -646,7 +658,7 @@ export function ScheduledView({
                         </div>
                         {job.lastSummary && (
                           <div className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300 line-clamp-2">
-                            {job.lastSummary}
+                            {maskSensitiveText(job.lastSummary, privacyMode)}
                           </div>
                         )}
                         {job.lastReportFile && (

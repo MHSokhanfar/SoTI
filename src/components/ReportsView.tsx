@@ -53,7 +53,7 @@ import {
   type TableDensity,
   type VerdictFilterOption,
 } from '../utils/reportsAnalytics';
-import { exportReportsDashboardPdf } from '../utils/reportPdf';
+import { exportDashboardSummaryPdf, exportReportsDashboardPdf } from '../utils/reportPdf';
 import {
   buildShareReportMessage,
   SHARE_TTL_OPTIONS,
@@ -69,6 +69,8 @@ import { LiveActivityFeed } from './LiveActivityFeed';
 import { RelationshipGraphWidget } from './RelationshipGraphWidget';
 import { RiskScoreHeatmap } from './RiskScoreHeatmap';
 import { ThreatLandscapeWidget } from './ThreatLandscapeWidget';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 type ChartScope = 'malicious_clean' | 'all_verdicts';
 type TrendMode = 'total' | 'severity';
@@ -194,6 +196,7 @@ export function ReportsView({
   sharedReportError = null,
   onDismissSharedReport,
 }: ReportsViewProps) {
+  const privacyMode = usePrivacyMode();
   const isDark = theme === 'dark';
   const [reports, setReports] = useState<ReportMeta[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -207,6 +210,7 @@ export function ReportsView({
   const [exportingCsv, setExportingCsv] = useState(false);
   const [exportingSelectedCsv, setExportingSelectedCsv] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingSummaryPdf, setExportingSummaryPdf] = useState(false);
   const [selectedForExport, setSelectedForExport] = useState<string[]>([]);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [refreshIntervalSec, setRefreshIntervalSec] = useState<number>(DEFAULT_REPORTS_REFRESH_SECONDS);
@@ -444,6 +448,55 @@ export function ReportsView({
       );
     } finally {
       setExportingPdf(false);
+    }
+  }
+
+  async function handleDownloadSummaryPdf() {
+    if ((reports.length === 0 && currentResults.length === 0) || exportingSummaryPdf) return;
+    setExportingSummaryPdf(true);
+
+    const toastId = pushToast(
+      {
+        variant: 'info',
+        title: 'Generating summary report',
+        detail: 'Consolidating risk trendline, heatmap distribution, and top malicious indicators...',
+      },
+      { id: 'summary-pdf-export-toast', durationMs: 12000 },
+    );
+
+    try {
+      const result = await exportDashboardSummaryPdf({
+        reports,
+        allRunRows,
+        selectedRows: rows,
+        currentResults,
+        quickStats,
+        totals,
+        trendSeries,
+        trendSummary,
+        aiSummary,
+        privacyMode,
+      });
+
+      pushToast(
+        {
+          variant: 'success',
+          title: 'Summary PDF downloaded',
+          detail: `${result.filename} (${result.pageCount} page${result.pageCount === 1 ? '' : 's'})`,
+        },
+        { id: toastId, durationMs: 4500 },
+      );
+    } catch {
+      pushToast(
+        {
+          variant: 'error',
+          title: 'Summary PDF export failed',
+          detail: 'Unable to generate consolidated risk summary PDF.',
+        },
+        { id: toastId, durationMs: 5000 },
+      );
+    } finally {
+      setExportingSummaryPdf(false);
     }
   }
 
@@ -778,7 +831,7 @@ export function ReportsView({
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 print:hidden">
+        <div className="flex flex-wrap items-center gap-2 print:hidden">
           <div className="inline-flex items-center rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
             <button
               type="button"
@@ -787,7 +840,7 @@ export function ReportsView({
               aria-label="Toggle automatic periodic refresh"
               data-testid="reports-auto-refresh-toggle"
               onClick={() => setAutoRefreshEnabled((prev) => !prev)}
-              className="inline-flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-l-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-l-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
             >
               <span
                 aria-hidden="true"
@@ -814,7 +867,7 @@ export function ReportsView({
               value={refreshIntervalSec}
               disabled={!autoRefreshEnabled}
               onChange={(e) => setRefreshIntervalSec(normalizeRefreshIntervalSeconds(e.target.value))}
-              className="rounded-r-lg bg-transparent px-2.5 py-2 font-mono text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed tabular-nums"
+              className="rounded-r-lg bg-transparent px-2 py-1.5 font-mono text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed tabular-nums"
             >
               {REPORTS_REFRESH_INTERVAL_OPTIONS.map((sec) => (
                 <option key={sec} value={sec} className="bg-white dark:bg-slate-900">
@@ -827,7 +880,7 @@ export function ReportsView({
           <div className="inline-flex items-center rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
             <label
               htmlFor="reports-table-density"
-              className="pl-3 pr-1.5 py-2 text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap select-none"
+              className="pl-2.5 pr-1 py-1.5 text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap select-none"
             >
               Density
             </label>
@@ -837,7 +890,7 @@ export function ReportsView({
               aria-label="Reports table density"
               value={tableDensity}
               onChange={(e) => setTableDensity(normalizeTableDensity(e.target.value))}
-              className="rounded-r-lg bg-transparent pr-2.5 py-2 text-xs font-medium text-slate-800 dark:text-slate-200 focus:outline-none cursor-pointer"
+              className="rounded-r-lg bg-transparent pr-2 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 focus:outline-none cursor-pointer"
             >
               {TABLE_DENSITY_OPTIONS.map((opt) => (
                 <option key={opt.id} value={opt.id} className="bg-white dark:bg-slate-900">
@@ -851,7 +904,7 @@ export function ReportsView({
             type="button"
             onClick={() => loadReports()}
             disabled={refreshing}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
             Refresh
@@ -864,7 +917,7 @@ export function ReportsView({
             disabled={reports.length === 0 || generatingSummary}
             aria-label="Generate AI executive summary"
             title="Use Gemini AI to draft an executive summary from visible investigation data and charts"
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
           >
             {generatingSummary ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-red-600 dark:text-red-400" aria-hidden="true" />
@@ -884,10 +937,27 @@ export function ReportsView({
             disabled={reports.length === 0}
             aria-label="Share Report"
             title="Create a temporary shareable link or copy formatted report message"
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
           >
             <Share2 className="h-3.5 w-3.5 text-slate-600 dark:text-slate-400" aria-hidden="true" />
             <span>Share Report</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="download-summary-button"
+            onClick={handleDownloadSummaryPdf}
+            disabled={(reports.length === 0 && currentResults.length === 0) || exportingSummaryPdf}
+            aria-label="Download Summary"
+            title="Download consolidated risk trendline, heatmap distribution, and top malicious indicators PDF"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
+          >
+            {exportingSummaryPdf ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-red-600 dark:text-red-400" aria-hidden="true" />
+            ) : (
+              <FileText className="h-3.5 w-3.5 text-red-600 dark:text-red-400" aria-hidden="true" />
+            )}
+            <span>{exportingSummaryPdf ? 'Summarizing...' : 'Download Summary'}</span>
           </button>
 
           <button
@@ -897,7 +967,7 @@ export function ReportsView({
             disabled={reports.length === 0 || exportingPdf}
             aria-label="Download PDF"
             title="Download current dashboard charts and data table as PDF"
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
           >
             {exportingPdf ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-600 dark:text-slate-300" aria-hidden="true" />
@@ -911,7 +981,7 @@ export function ReportsView({
             type="button"
             onClick={handleDownloadHistoricalCsv}
             disabled={reports.length === 0 || exportingCsv}
-            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
           >
             <Download className="h-3.5 w-3.5" aria-hidden="true" />
             {exportingCsv ? 'Exporting...' : 'Download as CSV'}
@@ -990,7 +1060,7 @@ export function ReportsView({
               <span className="font-semibold">Top Indicators:</span>
               {sharedReportSnapshot.topIndicators.slice(0, 5).map((item) => (
                 <span key={item.indicator} className="font-mono">
-                  {item.indicator}{' '}
+                  {maskIndicatorValue(item.indicator, null, privacyMode)}{' '}
                   <span className="text-slate-500 dark:text-slate-400">
                     ({item.confidenceScore !== null ? `${item.confidenceScore}/100 · ` : ''}
                     {item.verdictSummary})
@@ -1002,7 +1072,7 @@ export function ReportsView({
 
           {sharedReportSnapshot.executiveSummary && (
             <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 text-xs leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-wrap">
-              {sharedReportSnapshot.executiveSummary}
+              {maskSensitiveText(sharedReportSnapshot.executiveSummary, privacyMode)}
             </div>
           )}
         </section>
@@ -1190,7 +1260,7 @@ export function ReportsView({
                 </div>
               ) : (
                 <div data-testid="ai-summary-content">
-                  {renderExecutiveSummaryContent(aiSummary || '')}
+                  {renderExecutiveSummaryContent(maskSensitiveText(aiSummary || '', privacyMode))}
                 </div>
               )}
             </section>
@@ -1829,7 +1899,9 @@ export function ReportsView({
                         const confidence = confidenceMap.get((row.indicator || '').trim().toLowerCase());
                         return (
                           <tr key={idx} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
-                            <td className={`${densitySpec.cellPaddingClass} font-mono font-medium text-slate-900 dark:text-slate-100`}>{row.indicator}</td>
+                            <td className={`${densitySpec.cellPaddingClass} font-mono font-medium text-slate-900 dark:text-slate-100`}>
+                              {maskIndicatorValue(row.indicator || '', null, privacyMode)}
+                            </td>
                             <td className={`${densitySpec.cellPaddingClass} font-mono text-slate-500 dark:text-slate-400`}>{row.type}</td>
                             <td className={`${densitySpec.cellPaddingClass} text-slate-800 dark:text-slate-200 whitespace-nowrap`}>{row.source}</td>
                             <td className={`${densitySpec.cellPaddingClass} font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap`}>
@@ -1861,7 +1933,9 @@ export function ReportsView({
                                 <span className="text-slate-400 dark:text-slate-500">—</span>
                               )}
                             </td>
-                            <td className={`${densitySpec.cellPaddingClass} text-slate-600 dark:text-slate-300`}>{row.summary}</td>
+                            <td className={`${densitySpec.cellPaddingClass} text-slate-600 dark:text-slate-300`}>
+                              {maskSensitiveText(row.summary || '', privacyMode)}
+                            </td>
                           </tr>
                         );
                       })}
@@ -1895,7 +1969,9 @@ export function ReportsView({
               )}
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-semibold text-slate-950 dark:text-slate-50">{item.title}</p>
-                <p className="mt-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-400 truncate">{item.detail}</p>
+                <p className="mt-0.5 font-mono text-[11px] text-slate-600 dark:text-slate-400 truncate">
+                  {maskSensitiveText(item.detail, privacyMode)}
+                </p>
               </div>
               <button
                 type="button"
@@ -2054,7 +2130,8 @@ export function ReportsView({
                         type="button"
                         data-testid="copy-share-message-btn"
                         onClick={async () => {
-                          const msg = buildShareReportMessage(createdShareSnapshot, createdShareUrl);
+                          const rawMsg = buildShareReportMessage(createdShareSnapshot, createdShareUrl);
+                          const msg = maskSensitiveText(rawMsg, privacyMode);
                           const ok = await copyToClipboard(msg);
                           if (ok) {
                             setCopiedShareMessage(true);
@@ -2081,7 +2158,10 @@ export function ReportsView({
                       data-testid="share-message-output"
                       readOnly
                       rows={5}
-                      value={buildShareReportMessage(createdShareSnapshot, createdShareUrl)}
+                      value={maskSensitiveText(
+                        buildShareReportMessage(createdShareSnapshot, createdShareUrl),
+                        privacyMode,
+                      )}
                       className="mt-1.5 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-3 font-mono text-[11px] leading-relaxed text-slate-800 dark:text-slate-200 focus:outline-none"
                     />
                   </div>

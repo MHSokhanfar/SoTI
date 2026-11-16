@@ -30,6 +30,7 @@ export interface SessionSnapshotInput {
   researcherNotes: string;
   indicatorTags: IndicatorTagMap;
   verdictFilter?: 'All' | Verdict;
+  resultsTagFilter?: string;
   riskThreshold?: number;
   tableSort?: ResultsSortState | null;
   results: LookupResult[];
@@ -53,6 +54,7 @@ export interface DecodedSessionSnapshot {
   researcherNotes: string;
   indicatorTags: IndicatorTagMap;
   verdictFilter: 'All' | Verdict;
+  resultsTagFilter: string;
   riskThreshold: number;
   tableSort: ResultsSortState | null;
   results: LookupResult[];
@@ -92,6 +94,7 @@ interface WireSessionSnapshotV1 {
   rn: string;
   tags: IndicatorTagMap;
   vf: 'All' | Verdict;
+  rtf?: string;
   rt: number;
   ts: ResultsSortState | null;
   td?: boolean;
@@ -223,6 +226,10 @@ export function encodeSessionSnapshot(input: SessionSnapshotInput): {
     rn: (input.researcherNotes || '').slice(0, 4000),
     tags: scopeTagsToResults(input.indicatorTags, input.results),
     vf: input.verdictFilter || 'All',
+    rtf:
+      typeof input.resultsTagFilter === 'string' && input.resultsTagFilter.trim()
+        ? input.resultsTagFilter.trim()
+        : 'All',
     rt:
       typeof input.riskThreshold === 'number' && Number.isFinite(input.riskThreshold)
         ? Math.max(0, Math.min(100, Math.round(input.riskThreshold)))
@@ -400,6 +407,8 @@ export function decodeSessionSnapshot(rawToken: string): DecodedSessionSnapshot 
       researcherNotes: typeof parsed.rn === 'string' ? parsed.rn : '',
       indicatorTags: tags,
       verdictFilter,
+      resultsTagFilter:
+        typeof parsed.rtf === 'string' && parsed.rtf.trim() ? parsed.rtf.trim() : 'All',
       riskThreshold:
         typeof parsed.rt === 'number' && Number.isFinite(parsed.rt)
           ? Math.max(0, Math.min(100, Math.round(parsed.rt)))

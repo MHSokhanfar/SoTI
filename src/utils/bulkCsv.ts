@@ -232,3 +232,9 @@ export function extractIndicatorsFromFile(
   return extractIndicatorsFromCsv(fileContent);
 }
 
+export function formatBulkIndicatorsText(
+  parsed: Pick<BulkCsvImportResult, 'indicators'>,
+): string {
+  return (parsed.indicators || []).join('\n');
+}
+

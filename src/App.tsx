@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { EyeOff } from 'lucide-react';
 import { TopBar, type ActiveTab } from './components/TopBar';
 import {
   InvestigateView,
@@ -12,15 +13,18 @@ import { ScheduledView, type ScheduledNavigationTarget } from './components/Sche
 import { CliSetupView } from './components/CliSetupView';
 import { HelpModal } from './components/HelpModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
-import { NotificationCenter } from './components/NotificationCenter';
+import { NotificationCenter, type NotificationCenterTab } from './components/NotificationCenter';
+import { PrivacyModeContext } from './components/PrivacyModeContext';
 import { QuickNotesSidebarPanel } from './components/QuickNotesSidebarPanel';
 import {
   ALL_SOURCE_IDS,
+  EXTRA_PROVIDER_META,
   cloneDefaultApiSettings,
   mergeConfigAndConnectionStatus,
   type ApiKeyStatus,
   type ApiSettings,
   type BuiltinExtraSourceId,
+  type ProviderLatencySnapshot,
 } from './utils/apiConfig';
 import {
   buildGlobalSearchIndex,
@@ -28,6 +32,7 @@ import {
 } from './utils/globalSearch';
 import type { SourceId } from './utils/indicators';
 import {
+  clearRecentInvestigations,
   loadRecentInvestigations,
   type RecentInvestigationEntry,
 } from './utils/investigationHistory';
@@ -37,7 +42,11 @@ import type { ReportMeta } from './utils/reportsAnalytics';
 import { parseShareTokenFromUrl, type SharedReportSnapshot } from './utils/reportSharing';
 import type { ScheduledJob } from './utils/scheduler';
 import { matchGlobalKeyboardShortcut } from './utils/keyboardShortcuts';
-import { loadNotesAutoSaveState } from './utils/notesAutoSave';
+import {
+  createEmptyNotesAutoSaveState,
+  loadNotesAutoSaveState,
+  saveNotesAutoSaveState,
+} from './utils/notesAutoSave';
 import { DEFAULT_LIVE_POLL_SECONDS } from './utils/livePolling';
 import {
   clearQuickNotesState,
@@ -72,6 +81,27 @@ import {
   toggleIocInWatchlist,
   type WatchlistItem,
 } from './utils/watchlist';
+import {
+  buildAlertRuleHistoryEntries,
+  buildDesktopNotificationsFromHits,
+  evaluateCustomAlertRules,
+  formatDesktopBrowserNotificationContent,
+  loadAlertRuleHistory,
+  loadCustomAlertRules,
+  loadDesktopRuleNotifications,
+  saveAlertRuleHistory,
+  saveCustomAlertRules,
+  saveDesktopRuleNotifications,
+  type AlertRuleEvaluationHit,
+  type AlertRuleTriggerHistoryEntry,
+  type CustomAlertRule,
+  type DesktopRuleNotification,
+} from './utils/alertRules';
+import {
+  loadPrivacyMode,
+  maskIndicatorValue,
+  savePrivacyMode,
+} from './utils/privacyMode';
 import type { IndicatorType, LookupResult, Verdict } from './utils/indicators';
 
 interface ConfigStatus {
@@ -108,8 +138,23 @@ export default function App() {
   const [sharedReportSnapshot, setSharedReportSnapshot] = useState<SharedReportSnapshot | null>(null);
   const [sharedReportError, setSharedReportError] = useState<string | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [notificationRequestedTab, setNotificationRequestedTab] = useState<'alerts' | 'email_rules' | null>(null);
+  const [notificationRequestedTab, setNotificationRequestedTab] =
+    useState<NotificationCenterTab | null>(null);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [privacyMode, setPrivacyMode] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? loadPrivacyMode(window.localStorage) : false,
+  );
+  const [alertRules, setAlertRules] = useState<CustomAlertRule[]>(() =>
+    typeof window !== 'undefined' ? loadCustomAlertRules(window.localStorage) : [],
+  );
+  const [desktopRuleAlerts, setDesktopRuleAlerts] = useState<DesktopRuleNotification[]>(() =>
+    typeof window !== 'undefined' ? loadDesktopRuleNotifications(window.localStorage) : [],
+  );
+  const [activeDesktopToastIds, setActiveDesktopToastIds] = useState<string[]>([]);
+  const [alertRuleHistory, setAlertRuleHistory] = useState<AlertRuleTriggerHistoryEntry[]>(() =>
+    typeof window !== 'undefined' ? loadAlertRuleHistory(window.localStorage) : [],
+  );
+  const desktopToastTimersRef = useRef<Map<string, number>>(new Map());
   const [dispatchedEmailAlerts, setDispatchedEmailAlerts] = useState<EmailAlertRecord[]>([]);
   const [emailAlertsRefreshNonce, setEmailAlertsRefreshNonce] = useState(0);
   const [latestReport, setLatestReport] = useState<string | null>(null);
@@ -151,6 +196,11 @@ export default function App() {
     providers: [],
   });
   const [connectionOverrides, setConnectionOverrides] = useState<Record<string, boolean>>({});
+  const [providerLatencies, setProviderLatencies] = useState<
+    Record<string, ProviderLatencySnapshot>
+  >({});
+  const [lastApiLatency, setLastApiLatency] = useState<ProviderLatencySnapshot | null>(null);
+  const [clearHistoryNonce, setClearHistoryNonce] = useState(0);
   const [investigationState, setInvestigationState] = useState<InvestigationState>({
     rawInput: SAMPLE_BATCH,
     source: 'all',
@@ -303,6 +353,39 @@ export default function App() {
       saveWatchlist(window.localStorage, watchlistItems);
     }
   }, [watchlistItems]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      savePrivacyMode(window.localStorage, privacyMode);
+    }
+  }, [privacyMode]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveCustomAlertRules(window.localStorage, alertRules);
+    }
+  }, [alertRules]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveDesktopRuleNotifications(window.localStorage, desktopRuleAlerts);
+    }
+  }, [desktopRuleAlerts]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveAlertRuleHistory(window.localStorage, alertRuleHistory);
+    }
+  }, [alertRuleHistory]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of desktopToastTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      desktopToastTimersRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -472,6 +555,195 @@ export default function App() {
     setEmailAlertsRefreshNonce((n) => n + 1);
   }, []);
 
+  const pushDesktopToastIds = useCallback((items: readonly DesktopRuleNotification[]) => {
+    if (items.length === 0) return;
+    setActiveDesktopToastIds((prev) => [
+      ...items.map((i) => i.id),
+      ...prev.filter((id) => !items.some((i) => i.id === id)),
+    ].slice(0, 3));
+
+    for (const item of items) {
+      const existingTimer = desktopToastTimersRef.current.get(item.id);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      const timer = window.setTimeout(() => {
+        setActiveDesktopToastIds((prev) => prev.filter((id) => id !== item.id));
+        desktopToastTimersRef.current.delete(item.id);
+      }, 9000);
+      desktopToastTimersRef.current.set(item.id, timer);
+
+      if (
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        window.Notification.permission === 'granted'
+      ) {
+        try {
+          const { title, body } = formatDesktopBrowserNotificationContent(
+            item,
+            (val, kind) => maskIndicatorValue(val, kind, privacyMode),
+          );
+          new window.Notification(title, { body });
+        } catch {
+          // ignore desktop OS notification failures in sandboxed contexts
+        }
+      }
+    }
+  }, [privacyMode]);
+
+  const dispatchHits = useCallback(
+    async (
+      hits: AlertRuleEvaluationHit[],
+      mode: 'sample' | 'live' | 'test',
+      reportFile?: string | null,
+    ) => {
+      if (hits.length === 0) return;
+      const nowIso = new Date().toISOString();
+      const desktopItems = buildDesktopNotificationsFromHits(hits, nowIso);
+      if (desktopItems.length > 0) {
+        setDesktopRuleAlerts((prev) => [...desktopItems, ...prev].slice(0, 30));
+        pushDesktopToastIds(desktopItems);
+      }
+
+      const deliverySummaryByRuleId: Record<string, string> = {};
+      for (const hit of hits) {
+        if (hit.rule.channel === 'email' || hit.rule.channel === 'both') {
+          try {
+            const resp = await fetch('/api/alerts/rules/dispatch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ruleName: hit.rule.name,
+                minRiskScore: hit.rule.minRiskScore,
+                recipients: hit.rule.emailRecipients,
+                matches: hit.matches,
+                mode,
+                reportFile: reportFile ?? null,
+              }),
+            });
+            const data = await resp.json();
+            if (resp.ok && data?.record) {
+              handleEmailAlertDispatched(data.record);
+              deliverySummaryByRuleId[hit.rule.id] =
+                hit.rule.channel === 'both'
+                  ? `Desktop toast + Email (${data.record.deliveryStatus})`
+                  : `Email (${data.record.deliveryStatus})`;
+            } else {
+              deliverySummaryByRuleId[hit.rule.id] =
+                hit.rule.channel === 'both'
+                  ? `Desktop alert fired · Email skipped (${data?.error || 'no recipients'})`
+                  : `Email failed (${data?.error || 'no recipients'})`;
+            }
+          } catch {
+            deliverySummaryByRuleId[hit.rule.id] =
+              hit.rule.channel === 'both'
+                ? 'Desktop alert fired · Email dispatch unreachable'
+                : 'Email dispatch failed';
+          }
+        }
+      }
+
+      const entries = buildAlertRuleHistoryEntries(
+        hits,
+        mode,
+        nowIso,
+        deliverySummaryByRuleId,
+      );
+      setAlertRuleHistory((prev) => [...entries, ...prev].slice(0, 40));
+    },
+    [handleEmailAlertDispatched, pushDesktopToastIds],
+  );
+
+  const handleEvaluateAlertRules = useCallback(
+    (
+      results: readonly LookupResult[],
+      mode: 'sample' | 'live',
+      reportFile?: string | null,
+    ): { matchedRules: number; message: string } => {
+      if (results.length === 0) {
+        return { matchedRules: 0, message: 'No investigation results available to evaluate.' };
+      }
+      const evaluation = evaluateCustomAlertRules({
+        rules: alertRules,
+        results,
+        mode,
+      });
+      setAlertRules(evaluation.updatedRules);
+      if (evaluation.hits.length > 0) {
+        void dispatchHits(evaluation.hits, mode, reportFile);
+        return {
+          matchedRules: evaluation.hits.length,
+          message: `Matched ${evaluation.hits.length} alert rule(s) across active results.`,
+        };
+      }
+      return {
+        matchedRules: 0,
+        message: 'Evaluated active rules — no indicators met custom rule criteria.',
+      };
+    },
+    [alertRules, dispatchHits],
+  );
+
+  const handleSaveAlertRule = useCallback((rule: CustomAlertRule) => {
+    setAlertRules((prev) => {
+      const idx = prev.findIndex((r) => r.id === rule.id);
+      if (idx === -1) return [rule, ...prev];
+      const next = [...prev];
+      next[idx] = rule;
+      return next;
+    });
+  }, []);
+
+  const handleToggleAlertRule = useCallback((ruleId: string) => {
+    setAlertRules((prev) =>
+      prev.map((r) => (r.id === ruleId ? { ...r, enabled: !r.enabled } : r)),
+    );
+  }, []);
+
+  const handleDeleteAlertRule = useCallback((ruleId: string) => {
+    setAlertRules((prev) => prev.filter((r) => r.id !== ruleId));
+  }, []);
+
+  const handleTestAlertRule = useCallback(
+    async (rule: CustomAlertRule): Promise<{ ok: boolean; message: string }> => {
+      const sampleIndicator =
+        rule.indicatorType === 'ip'
+          ? '185.220.101.44'
+          : rule.indicatorType === 'hash'
+            ? '44d88612fea8a8f36de82e1278abb02f'
+            : rule.indicatorType === 'url'
+              ? 'https://login-check.example/auth'
+              : 'evil-test.example';
+      const nowIso = new Date().toISOString();
+      const updatedRule: CustomAlertRule = {
+        ...rule,
+        lastTriggeredAt: nowIso,
+        triggerCount: (rule.triggerCount || 0) + 1,
+      };
+      setAlertRules((prev) => prev.map((r) => (r.id === rule.id ? updatedRule : r)));
+      const hit: AlertRuleEvaluationHit = {
+        rule: updatedRule,
+        matches: [
+          {
+            indicator: sampleIndicator,
+            type: rule.indicatorType === 'all' ? 'domain' : rule.indicatorType,
+            confidenceScore: Math.max(88, rule.minRiskScore),
+            riskLevel: rule.minRiskScore >= 75 ? 'Critical' : 'High',
+            overallVerdict: 'Malicious',
+            activeProviderCount: 3,
+            explanation: `Rule "${rule.name}" test trigger (score >= ${rule.minRiskScore})`,
+          },
+        ],
+      };
+      await dispatchHits([hit], 'test', null);
+      return {
+        ok: true,
+        message: `Test alert triggered for "${rule.name}" via ${rule.channel === 'both' ? 'Desktop + Email' : rule.channel}.`,
+      };
+    },
+    [dispatchHits],
+  );
+
   const handleToggleWatchIoc = useCallback(
     (
       indicator: string,
@@ -542,8 +814,51 @@ export default function App() {
     [],
   );
 
+  const resolveProviderDisplayLabel = useCallback(
+    (providerId: string): string => {
+      if (providerId === 'virustotal') return 'VirusTotal';
+      if (providerId === 'abuseipdb') return 'AbuseIPDB';
+      if (providerId === 'alienvault') return 'AlienVault OTX';
+      if (providerId === 'shodan' || providerId === 'threatfox' || providerId === 'urlscan') {
+        return EXTRA_PROVIDER_META[providerId].name;
+      }
+      const customMatch = (apiSettings.customProviders || []).find((cp) => cp.id === providerId);
+      return customMatch?.name || providerId;
+    },
+    [apiSettings.customProviders],
+  );
+
+  const recordProviderLatency = useCallback(
+    (providerId: string, ok: boolean, latencyMs?: number) => {
+      if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs) || latencyMs <= 0) return;
+      const snapshot: ProviderLatencySnapshot = {
+        providerId,
+        providerLabel: resolveProviderDisplayLabel(providerId),
+        latencyMs: Math.round(latencyMs),
+        ok,
+        checkedAt: new Date().toISOString(),
+      };
+      setProviderLatencies((prev) => ({ ...prev, [providerId]: snapshot }));
+      setLastApiLatency(snapshot);
+    },
+    [resolveProviderDisplayLabel],
+  );
+
+  const handleClearRecentHistoryFromSearch = useCallback(() => {
+    setRecentHistory([]);
+    setClearHistoryNonce((prev) => prev + 1);
+    setInvestigationState((prev) => ({ ...prev, activeHistoryId: null }));
+    if (typeof window !== 'undefined') {
+      clearRecentInvestigations(window.localStorage);
+      saveNotesAutoSaveState(window.localStorage, createEmptyNotesAutoSaveState());
+    }
+  }, []);
+
   const handleTestProviderFromTopBar = useCallback(
-    async (providerId: string): Promise<{ ok: boolean; message?: string }> => {
+    async (
+      providerId: string,
+    ): Promise<{ ok: boolean; message?: string; latencyMs?: number }> => {
+      const clientStart = performance.now();
       try {
         const resp = await fetch('/api/config/apis/test', {
           method: 'POST',
@@ -555,91 +870,169 @@ export default function App() {
         });
         const data = await resp.json();
         const ok = Boolean(data?.ok);
+        const clientElapsed = Math.max(1, Math.round(performance.now() - clientStart));
+        const measuredLatency =
+          typeof data?.latencyMs === 'number' && data.latencyMs > 0
+            ? Math.round(data.latencyMs)
+            : clientElapsed;
         setConnectionOverrides((prev) => ({ ...prev, [providerId]: ok }));
+        recordProviderLatency(providerId, ok, measuredLatency);
         if (data?.quota?.date && Array.isArray(data?.quota?.providers)) {
           setQuotaState(data.quota);
         }
         return {
           ok,
+          latencyMs: measuredLatency,
           message: data?.message || data?.error || (ok ? 'Verified' : 'Check failed'),
         };
       } catch {
+        const clientElapsed = Math.max(1, Math.round(performance.now() - clientStart));
         setConnectionOverrides((prev) => ({ ...prev, [providerId]: false }));
-        return { ok: false, message: 'Server unreachable' };
+        recordProviderLatency(providerId, false, clientElapsed);
+        return { ok: false, latencyMs: clientElapsed, message: 'Server unreachable' };
       }
     },
-    [apiSettings.timeoutSeconds],
+    [apiSettings.timeoutSeconds, recordProviderLatency],
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
-      <TopBar
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        latestReport={latestReport}
-        apiStatus={effectiveApiStatus}
-        extraKeyStatus={configStatus.extraKeys}
-        customKeyStatus={configStatus.customKeys}
-        apiSettings={apiSettings}
-        connectionOverrides={connectionOverrides}
-        onTestProvider={handleTestProviderFromTopBar}
-        onOpenHelp={() => setHelpOpen(true)}
-        onOpenShortcuts={() => setShortcutsOpen(true)}
-        theme={theme}
-        onToggleTheme={() => setTheme((prev) => toggleThemeMode(prev))}
-        notificationCount={unreadNotifications}
-        notificationsOpen={notificationsOpen}
-        onToggleNotifications={() => {
-          setNotificationRequestedTab(null);
-          setNotificationsOpen((prev) => !prev);
-        }}
-        searchEntries={globalSearchEntries}
-        searchFocusNonce={searchFocusNonce}
-        onSearchFocus={() => refreshGlobalSearchData(false)}
-        onSelectSearchResult={handleSelectGlobalSearchResult}
-        quickNotesOpen={quickNotesDrawerOpen}
-        quickNotesHasContent={quickNotes.text.trim().length > 0}
-        onToggleQuickNotes={() => setQuickNotesDrawerOpen((prev) => !prev)}
-      />
+    <PrivacyModeContext.Provider value={privacyMode}>
+      <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
+        <TopBar
+          activeTab={activeTab}
+          onSelectTab={setActiveTab}
+          latestReport={latestReport}
+          apiStatus={effectiveApiStatus}
+          extraKeyStatus={configStatus.extraKeys}
+          customKeyStatus={configStatus.customKeys}
+          apiSettings={apiSettings}
+          connectionOverrides={connectionOverrides}
+          providerLatencies={providerLatencies}
+          lastApiLatency={lastApiLatency}
+          onTestProvider={handleTestProviderFromTopBar}
+          onOpenHelp={() => setHelpOpen(true)}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
+          theme={theme}
+          onToggleTheme={() => setTheme((prev) => toggleThemeMode(prev))}
+          notificationCount={unreadNotifications}
+          notificationsOpen={notificationsOpen}
+          onToggleNotifications={() => {
+            setNotificationRequestedTab(null);
+            setNotificationsOpen((prev) => !prev);
+          }}
+          searchEntries={globalSearchEntries}
+          recentHistoryCount={recentHistory.length}
+          onClearRecentHistory={handleClearRecentHistoryFromSearch}
+          searchFocusNonce={searchFocusNonce}
+          onSearchFocus={() => refreshGlobalSearchData(false)}
+          onSelectSearchResult={handleSelectGlobalSearchResult}
+          quickNotesOpen={quickNotesDrawerOpen}
+          quickNotesHasContent={quickNotes.text.trim().length > 0}
+          onToggleQuickNotes={() => setQuickNotesDrawerOpen((prev) => !prev)}
+          privacyMode={privacyMode}
+          onTogglePrivacyMode={() => setPrivacyMode((prev) => !prev)}
+        />
 
-      <NotificationCenter
-        quotaState={quotaState}
-        emailAlerts={dispatchedEmailAlerts}
-        emailAlertsRefreshNonce={emailAlertsRefreshNonce}
-        isOpen={notificationsOpen}
-        requestedTab={notificationRequestedTab}
-        onOpenPanel={() => setNotificationsOpen(true)}
-        onClosePanel={() => setNotificationsOpen(false)}
-        onUnreadCountChange={setUnreadNotifications}
-        onNavigateToApis={() => {
-          setNotificationsOpen(false);
-          setActiveTab('cli');
-        }}
-        onEmailAlertDispatched={handleEmailAlertDispatched}
-        onClearEmailAlerts={() => setDispatchedEmailAlerts([])}
-      />
+        <NotificationCenter
+          quotaState={quotaState}
+          emailAlerts={dispatchedEmailAlerts}
+          emailAlertsRefreshNonce={emailAlertsRefreshNonce}
+          alertRules={alertRules}
+          desktopRuleAlerts={desktopRuleAlerts}
+          activeDesktopToastIds={activeDesktopToastIds}
+          alertRuleHistory={alertRuleHistory}
+          currentResults={investigationState.results}
+          isOpen={notificationsOpen}
+          requestedTab={notificationRequestedTab}
+          onOpenPanel={() => setNotificationsOpen(true)}
+          onClosePanel={() => setNotificationsOpen(false)}
+          onUnreadCountChange={setUnreadNotifications}
+          onNavigateToApis={() => {
+            setNotificationsOpen(false);
+            setActiveTab('cli');
+          }}
+          onEmailAlertDispatched={handleEmailAlertDispatched}
+          onClearEmailAlerts={() => setDispatchedEmailAlerts([])}
+          onSaveAlertRule={handleSaveAlertRule}
+          onToggleAlertRule={handleToggleAlertRule}
+          onDeleteAlertRule={handleDeleteAlertRule}
+          onTestAlertRule={handleTestAlertRule}
+          onEvaluateAlertRulesNow={() =>
+            handleEvaluateAlertRules(
+              investigationState.results,
+              investigationState.lastRunMode ?? investigationState.mode,
+              investigationState.lastReportFile,
+            )
+          }
+          onClearAlertRuleHistory={() => setAlertRuleHistory([])}
+          onMarkDesktopAlertRead={(id) =>
+            setDesktopRuleAlerts((prev) =>
+              prev.map((a) => (a.id === id ? { ...a, read: true } : a)),
+            )
+          }
+          onDismissDesktopAlert={(id) => {
+            setActiveDesktopToastIds((prev) => prev.filter((item) => item !== id));
+            setDesktopRuleAlerts((prev) => prev.filter((a) => a.id !== id));
+          }}
+          onMarkAllDesktopAlertsRead={() =>
+            setDesktopRuleAlerts((prev) => prev.map((a) => ({ ...a, read: true })))
+          }
+          onClearDesktopAlerts={() => {
+            setActiveDesktopToastIds([]);
+            setDesktopRuleAlerts([]);
+          }}
+          onDismissDesktopToast={(id) => {
+            const timer = desktopToastTimersRef.current.get(id);
+            if (timer !== undefined) {
+              window.clearTimeout(timer);
+              desktopToastTimersRef.current.delete(id);
+            }
+            setActiveDesktopToastIds((prev) => prev.filter((item) => item !== id));
+          }}
+        />
 
-      {quickNotesDrawerOpen && (
-        <div className="fixed inset-0 z-50 flex justify-end print:hidden" role="dialog" aria-modal="true" aria-label="Quick Notes sidebar">
-          <div
-            className="fixed inset-0 bg-slate-950/35 backdrop-blur-[1px]"
-            onClick={() => setQuickNotesDrawerOpen(false)}
-          />
-          <aside className="relative z-10 h-full w-full max-w-sm border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
-            <QuickNotesSidebarPanel
-              variant="drawer"
-              notesState={quickNotes}
-              onChangeText={(nextText) =>
-                setQuickNotes((prev) => updateQuickNotesText(prev, nextText))
-              }
-              onClearText={() => setQuickNotes((prev) => clearQuickNotesState(prev))}
-              onCloseDrawer={() => setQuickNotesDrawerOpen(false)}
+        {quickNotesDrawerOpen && (
+          <div className="fixed inset-0 z-50 flex justify-end print:hidden" role="dialog" aria-modal="true" aria-label="Quick Notes sidebar">
+            <div
+              className="fixed inset-0 bg-slate-950/35 backdrop-blur-[1px]"
+              onClick={() => setQuickNotesDrawerOpen(false)}
             />
-          </aside>
-        </div>
-      )}
+            <aside className="relative z-10 h-full w-full max-w-sm border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
+              <QuickNotesSidebarPanel
+                variant="drawer"
+                notesState={quickNotes}
+                onChangeText={(nextText) =>
+                  setQuickNotes((prev) => updateQuickNotesText(prev, nextText))
+                }
+                onClearText={() => setQuickNotes((prev) => clearQuickNotesState(prev))}
+                onCloseDrawer={() => setQuickNotesDrawerOpen(false)}
+              />
+            </aside>
+          </div>
+        )}
 
-      <main className="mx-auto max-w-[1280px] px-4 py-6 md:px-6 md:py-8">
+        <main className="mx-auto max-w-[1280px] px-4 py-6 md:px-6 md:py-8">
+          {privacyMode && (
+            <div
+              role="status"
+              data-testid="privacy-mode-banner"
+              className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 dark:border-amber-800/80 bg-amber-50/90 dark:bg-amber-950/35 px-4 py-2 text-xs text-amber-950 dark:text-amber-200 print:hidden"
+            >
+              <div className="flex items-center gap-2">
+                <EyeOff className="h-3.5 w-3.5 text-amber-700 dark:text-amber-400 shrink-0" aria-hidden="true" />
+                <span>
+                  <strong>Privacy Mode Active:</strong> Sensitive IOC values (IPs, domains, URLs, and hashes) are masked across all views for safe screen sharing.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPrivacyMode(false)}
+                className="font-semibold text-amber-900 dark:text-amber-300 hover:underline whitespace-nowrap cursor-pointer"
+              >
+                Reveal Original IOCs
+              </button>
+            </div>
+          )}
         {activeTab === 'investigate' && (
           <InvestigateView
             state={investigationState}
@@ -659,11 +1052,17 @@ export default function App() {
               setNotificationRequestedTab('email_rules');
               setNotificationsOpen(true);
             }}
+            onOpenAlertRules={() => {
+              setNotificationRequestedTab('alert_rules');
+              setNotificationsOpen(true);
+            }}
+            onEvaluateAlertRules={handleEvaluateAlertRules}
             navigationTarget={investigateNav}
             focusInputNonce={investigateFocusNonce}
             recentRegionFilter={recentRegionFilter}
             onClearRecentRegionFilter={() => setRecentRegionFilter(null)}
             onRecentHistoryChange={setRecentHistory}
+            clearHistoryNonce={clearHistoryNonce}
             watchlistItems={watchlistItems}
             onToggleWatchIoc={handleToggleWatchIoc}
             onAddWatchlistIndicator={handleAddWatchlistIndicator}
@@ -726,6 +1125,7 @@ export default function App() {
             }}
             onQuotaChange={setQuotaState}
             onEmailAlertTriggered={handleEmailAlertDispatched}
+            onEvaluateAlertRules={handleEvaluateAlertRules}
             navigationTarget={scheduledNav}
           />
         )}
@@ -739,18 +1139,34 @@ export default function App() {
             apiSettings={apiSettings}
             quota={quotaState}
             emailAlertsRefreshNonce={emailAlertsRefreshNonce}
+            alertRules={alertRules}
+            alertRuleHistory={alertRuleHistory}
+            currentResults={investigationState.results}
             onApiSettingsChange={(next) => {
               setApiSettings(next);
               refreshConfigStatus();
             }}
             onKeyStatusUpdated={refreshConfigStatus}
             onQuotaChange={setQuotaState}
-            onConnectionTestResult={(provider, ok) => {
+            onConnectionTestResult={(provider, ok, latencyMs) => {
               setConnectionOverrides((prev) => ({ ...prev, [provider]: ok }));
+              recordProviderLatency(provider, ok, latencyMs);
             }}
             onConnectionOverridesReset={() => setConnectionOverrides({})}
             onOpenHelp={() => setHelpOpen(true)}
             onEmailAlertDispatched={handleEmailAlertDispatched}
+            onSaveAlertRule={handleSaveAlertRule}
+            onToggleAlertRule={handleToggleAlertRule}
+            onDeleteAlertRule={handleDeleteAlertRule}
+            onTestAlertRule={handleTestAlertRule}
+            onEvaluateAlertRulesNow={() =>
+              handleEvaluateAlertRules(
+                investigationState.results,
+                investigationState.lastRunMode ?? investigationState.mode,
+                investigationState.lastReportFile,
+              )
+            }
+            onClearAlertRuleHistory={() => setAlertRuleHistory([])}
           />
         )}
       </main>
@@ -813,6 +1229,7 @@ export default function App() {
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
       />
-    </div>
+      </div>
+    </PrivacyModeContext.Provider>
   );
 }

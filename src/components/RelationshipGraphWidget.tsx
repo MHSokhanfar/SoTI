@@ -21,6 +21,8 @@ import {
 import type { LookupResult } from '../utils/indicators';
 import { copyToClipboard } from '../utils/clipboard';
 import type { ThemeMode } from '../utils/theme';
+import { maskIndicatorValue, maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 type GraphDataScope = 'combined' | 'selected' | 'active';
 
@@ -109,6 +111,7 @@ export function RelationshipGraphWidget({
   loading = false,
   onInspectIndicator,
 }: RelationshipGraphWidgetProps) {
+  const privacyMode = usePrivacyMode();
   const [scope, setScope] = useState<GraphDataScope>('combined');
   const [sharedOnly, setSharedOnly] = useState(false);
   const [focusIndicator, setFocusIndicator] = useState<string | null>(null);
@@ -406,6 +409,14 @@ export function RelationshipGraphWidget({
       .attr('pointer-events', 'none')
       .text((d) => NODE_TYPE_META[d.data.type].short);
 
+    const formatRelNodeLabel = (node: IocGraphNode): string => {
+      if (!privacyMode) return node.label;
+      if (node.type === 'ip' || node.type === 'domain' || node.type === 'file') {
+        return maskIndicatorValue(node.label, node.type === 'file' ? 'hash' : node.type, true);
+      }
+      return maskSensitiveText(node.label, true);
+    };
+
     nodeElements
       .append('text')
       .attr('y', (d) => (d.data.queried ? 36 : 30))
@@ -419,13 +430,22 @@ export function RelationshipGraphWidget({
       .attr('stroke-width', 3.5)
       .attr('stroke-linejoin', 'round')
       .attr('pointer-events', 'none')
-      .text((d) => shortenNodeLabel(d.data));
+      .text((d) =>
+        shortenNodeLabel({
+          ...d.data,
+          label: formatRelNodeLabel(d.data),
+          subLabel:
+            d.data.subLabel && privacyMode
+              ? maskSensitiveText(d.data.subLabel, true)
+              : d.data.subLabel,
+        }),
+      );
 
     nodeElements
       .append('title')
       .text(
         (d) =>
-          `${d.data.label} (${NODE_TYPE_META[d.data.type].label} · ${d.data.verdict}${d.data.isSharedHub ? ' · Shared Infrastructure Hub' : ''})`,
+          `${formatRelNodeLabel(d.data)} (${NODE_TYPE_META[d.data.type].label} · ${d.data.verdict}${d.data.isSharedHub ? ' · Shared Infrastructure Hub' : ''})`,
       );
 
     const renderPositions = () => {
@@ -468,7 +488,7 @@ export function RelationshipGraphWidget({
     return () => {
       simulation.stop();
     };
-  }, [graph, theme]);
+  }, [graph, theme, privacyMode]);
 
   // Highlight active selected node without restarting force physics
   useEffect(() => {
@@ -511,7 +531,12 @@ export function RelationshipGraphWidget({
   }
 
   async function handleCopyNodeValue(node: IocGraphNode) {
-    const ok = await copyToClipboard(node.label);
+    const valToCopy = privacyMode
+      ? node.type === 'ip' || node.type === 'domain' || node.type === 'file'
+        ? maskIndicatorValue(node.label, node.type === 'file' ? 'hash' : node.type, true)
+        : maskSensitiveText(node.label, true)
+      : node.label;
+    const ok = await copyToClipboard(valToCopy);
     if (ok) {
       setCopiedId(node.id);
       if (copyTimerRef.current !== null) {
@@ -668,7 +693,15 @@ export function RelationshipGraphWidget({
                 <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
                   {NODE_TYPE_META[bridge.hubType].short}
                 </span>
-                <span className="font-mono">{bridge.hubLabel}</span>
+                <span className="font-mono">
+                  {bridge.hubType === 'ip' || bridge.hubType === 'domain' || bridge.hubType === 'file'
+                    ? maskIndicatorValue(
+                        bridge.hubLabel,
+                        bridge.hubType === 'file' ? 'hash' : bridge.hubType,
+                        privacyMode,
+                      )
+                    : maskSensitiveText(bridge.hubLabel, privacyMode)}
+                </span>
                 <span className="font-mono text-[11px] text-amber-700 dark:text-amber-400 tabular-nums">
                   ({bridge.linkedIndicators.length})
                 </span>
@@ -681,7 +714,7 @@ export function RelationshipGraphWidget({
               onClick={() => setFocusIndicator(null)}
               className="ml-auto text-xs font-medium text-red-700 dark:text-red-400 hover:underline cursor-pointer"
             >
-              Clear Focus ({focusIndicator})
+              Clear Focus ({maskIndicatorValue(focusIndicator, null, privacyMode)})
             </button>
           )}
         </div>
@@ -760,11 +793,17 @@ export function RelationshipGraphWidget({
                     </span>
                   </div>
                   <p className="font-mono text-xs font-semibold text-slate-950 dark:text-slate-50 break-all">
-                    {selectedNode.label}
+                    {selectedNode.type === 'ip' || selectedNode.type === 'domain' || selectedNode.type === 'file'
+                      ? maskIndicatorValue(
+                          selectedNode.label,
+                          selectedNode.type === 'file' ? 'hash' : selectedNode.type,
+                          privacyMode,
+                        )
+                      : maskSensitiveText(selectedNode.label, privacyMode)}
                   </p>
                   {selectedNode.subLabel && (
                     <p className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-                      Filename: {selectedNode.subLabel}
+                      Filename: {maskSensitiveText(selectedNode.subLabel, privacyMode)}
                     </p>
                   )}
                 </div>
@@ -828,7 +867,17 @@ export function RelationshipGraphWidget({
                               {isOutgoing ? link.label : `← ${link.label}`} · {peer ? NODE_TYPE_META[peer.type].short : ''}
                             </span>
                             <span className="mt-0.5 block font-mono text-[11px] font-medium text-slate-800 dark:text-slate-200 [overflow-wrap:anywhere]">
-                              {peer?.subLabel ? `${peer.subLabel} (${peer.label.slice(0, 10)}...)` : peer?.label}
+                              {peer
+                                ? peer.type === 'ip' || peer.type === 'domain' || peer.type === 'file'
+                                  ? maskIndicatorValue(
+                                      peer.label,
+                                      peer.type === 'file' ? 'hash' : peer.type,
+                                      privacyMode,
+                                    )
+                                  : peer.subLabel
+                                    ? `${maskSensitiveText(peer.subLabel, privacyMode)} (${maskSensitiveText(peer.label, privacyMode)})`
+                                    : maskSensitiveText(peer.label, privacyMode)
+                                : ''}
                             </span>
                           </button>
                         </li>

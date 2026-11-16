@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, ScrollText } from 'lucide-react';
+import { maskSensitiveText } from '../utils/privacyMode';
+import { usePrivacyMode } from './PrivacyModeContext';
 
 export interface LogsNavigationTarget {
   query: string;
@@ -11,6 +13,7 @@ interface LogsViewProps {
 }
 
 export function LogsView({ navigationTarget }: LogsViewProps) {
+  const privacyMode = usePrivacyMode();
   const [lines, setLines] = useState<string[]>([]);
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
@@ -90,7 +93,7 @@ export function LogsView({ navigationTarget }: LogsViewProps) {
           <ul className="space-y-1.5">
             {visibleLines.map((line, idx) => (
               <li key={idx} className="whitespace-pre leading-relaxed">
-                {line}
+                {maskSensitiveText(line, privacyMode)}
               </li>
             ))}
           </ul>
