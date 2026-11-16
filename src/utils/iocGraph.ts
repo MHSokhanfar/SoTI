@@ -1,4 +1,4 @@
-import { detectIndicatorType, type LookupResult, type Verdict } from './indicators';
+import { detectIndicatorType, type LookupResult, type LookupStatus, type Verdict } from './indicators';
 
 export type IocNodeType = 'ip' | 'domain' | 'file' | 'infra' | 'malware';
 
@@ -16,6 +16,7 @@ export interface IocGraphNode {
   type: IocNodeType;
   verdict: Verdict;
   queried: boolean;
+  isSharedHub?: boolean;
   sources: string[];
   connectionCount: number;
   details: Record<string, string>;
@@ -30,10 +31,20 @@ export interface IocGraphLink {
   evidenceSource: string;
 }
 
+export interface SharedInfrastructureBridge {
+  hubId: string;
+  hubLabel: string;
+  hubType: IocNodeType;
+  linkedIndicators: string[];
+}
+
 export interface IocGraphData {
   nodes: IocGraphNode[];
   links: IocGraphLink[];
   queriedIndicators: string[];
+  sharedHubIds: string[];
+  sharedBridges: SharedInfrastructureBridge[];
+  sharedHubCount: number;
   countsByType: Record<IocNodeType, number>;
 }
 
@@ -109,9 +120,96 @@ function normalizeInfraNode(raw: string, key: string): { idKey: string; displayL
   return { idKey: trimmed.toLowerCase(), displayLabel: trimmed };
 }
 
+export function csvRowsToLookupResults(rows: Record<string, string>[]): LookupResult[] {
+  const out: LookupResult[] = [];
+  const seen = new Set<string>();
+
+  for (const row of rows) {
+    const indicator = String(row.indicator ?? '').trim();
+    const source = String(row.source ?? '').trim();
+    if (!indicator || !source) continue;
+
+    const dedupeKey = `${indicator.toLowerCase()}::${source.toLowerCase()}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    const rawType = String(row.type ?? '').trim().toLowerCase();
+    const type: LookupResult['type'] =
+      rawType === 'ip' || rawType === 'domain' || rawType === 'hash'
+        ? rawType
+        : detectIndicatorType(indicator) ?? 'domain';
+
+    const rawStatus = String(row.status ?? 'ok').trim().toLowerCase();
+    const status: LookupStatus =
+      rawStatus === 'ok' ||
+      rawStatus === 'not_found' ||
+      rawStatus === 'unsupported' ||
+      rawStatus === 'error'
+        ? rawStatus
+        : 'ok';
+
+    const rawVerdict = String(row.verdict ?? 'Unknown').trim();
+    const verdict: Verdict =
+      rawVerdict === 'Malicious' ||
+      rawVerdict === 'Suspicious' ||
+      rawVerdict === 'Clean' ||
+      rawVerdict === 'Unknown'
+        ? rawVerdict
+        : 'Unknown';
+
+    let parsedDetails: Record<string, string | number | boolean | null> = {};
+    const rawDetails = row.details;
+    if (typeof rawDetails === 'string' && rawDetails.trim().startsWith('{')) {
+      try {
+        const obj = JSON.parse(rawDetails);
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+          parsedDetails = obj;
+        }
+      } catch {
+        parsedDetails = {};
+      }
+    }
+
+    out.push({
+      source,
+      sourceId: source.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+      indicator,
+      originalToken: indicator,
+      type,
+      status,
+      verdict,
+      score: String(row.score ?? 'N/A'),
+      summary: String(row.summary ?? ''),
+      details: parsedDetails,
+      link: String(row.link ?? ''),
+    });
+  }
+
+  return out;
+}
+
+export function mergeGraphLookupResults(
+  currentResults: LookupResult[],
+  historicalRows: Record<string, string>[],
+): LookupResult[] {
+  const merged: LookupResult[] = [...currentResults];
+  const seen = new Set(
+    currentResults.map((r) => `${r.indicator.trim().toLowerCase()}::${r.source.trim().toLowerCase()}`),
+  );
+
+  for (const item of csvRowsToLookupResults(historicalRows)) {
+    const key = `${item.indicator.trim().toLowerCase()}::${item.source.trim().toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
 export function buildIocGraphData(
   results: LookupResult[],
-  options?: { focusIndicator?: string | null },
+  options?: { focusIndicator?: string | null; sharedOnly?: boolean },
 ): IocGraphData {
   const nodeMap = new Map<string, IocGraphNode>();
   const linkMap = new Map<string, IocGraphLink>();
@@ -229,6 +327,8 @@ export function buildIocGraphData(
       { key: 'Hostnames', relation: 'resolves_to' },
       { key: 'Latest Page', relation: 'resolves_to' },
       { key: 'Page Domain', relation: 'resolves_to' },
+      { key: 'Hosted Domain', relation: 'resolves_to' },
+      { key: 'Shared Domain', relation: 'resolves_to' },
       { key: 'Related Domain', relation: 'communicates_with' },
       { key: 'Contacted Domain', relation: 'communicates_with' },
     ];
@@ -326,7 +426,7 @@ export function buildIocGraphData(
     }
 
     // Malware / Threat attribution
-    const malwareKeys = ['Malware Families', 'Malware', 'Threat Label'];
+    const malwareKeys = ['Malware Families', 'Malware Family', 'Malware', 'Threat Label'];
     for (const key of malwareKeys) {
       for (const family of splitList(d[key])) {
         const targetId = makeNodeId('malware', family);
@@ -342,10 +442,61 @@ export function buildIocGraphData(
     }
   }
 
-  // Filter to focused IOC neighborhood (2-hop BFS) if requested
   let activeNodes = Array.from(nodeMap.values());
   let activeLinks = Array.from(linkMap.values());
 
+  // Identify shared infrastructure hubs: entities connecting >= 2 distinct neighbor nodes
+  const computeSharedHubs = (nodesList: IocGraphNode[], linksList: IocGraphLink[]) => {
+    const nodeById = new Map(nodesList.map((n) => [n.id, n]));
+    const neighborsMap = new Map<string, Set<string>>();
+    for (const l of linksList) {
+      if (!neighborsMap.has(l.sourceId)) neighborsMap.set(l.sourceId, new Set());
+      if (!neighborsMap.has(l.targetId)) neighborsMap.set(l.targetId, new Set());
+      neighborsMap.get(l.sourceId)!.add(l.targetId);
+      neighborsMap.get(l.targetId)!.add(l.sourceId);
+    }
+
+    const bridges: SharedInfrastructureBridge[] = [];
+    const hubIds = new Set<string>();
+    for (const node of nodesList) {
+      const neighbors = Array.from(neighborsMap.get(node.id) || [])
+        .map((nid) => nodeById.get(nid))
+        .filter((n): n is IocGraphNode => Boolean(n));
+      // Consider shared if >= 2 distinct connected nodes (especially >= 2 queried or multi-IOC links)
+      const uniqueIndicatorCount = neighbors.length;
+      const queriedNeighborCount = neighbors.filter((n) => n.queried).length;
+      if (uniqueIndicatorCount >= 2 && (queriedNeighborCount >= 2 || node.type === 'domain' || node.type === 'malware' || node.type === 'infra' || node.type === 'ip')) {
+        hubIds.add(node.id);
+        bridges.push({
+          hubId: node.id,
+          hubLabel: node.subLabel || node.label,
+          hubType: node.type,
+          linkedIndicators: neighbors.map((n) => n.label).sort(),
+        });
+      }
+    }
+
+    bridges.sort((a, b) => b.linkedIndicators.length - a.linkedIndicators.length || a.hubLabel.localeCompare(b.hubLabel));
+    return { hubIds, bridges };
+  };
+
+  if (options?.sharedOnly) {
+    const { hubIds } = computeSharedHubs(activeNodes, activeLinks);
+    if (hubIds.size > 0) {
+      const keepIds = new Set<string>(hubIds);
+      for (const l of activeLinks) {
+        if (hubIds.has(l.sourceId)) keepIds.add(l.targetId);
+        if (hubIds.has(l.targetId)) keepIds.add(l.sourceId);
+      }
+      activeNodes = activeNodes.filter((n) => keepIds.has(n.id));
+      activeLinks = activeLinks.filter((l) => keepIds.has(l.sourceId) && keepIds.has(l.targetId));
+    } else {
+      activeNodes = [];
+      activeLinks = [];
+    }
+  }
+
+  // Filter to focused IOC neighborhood (2-hop BFS) if requested
   if (options?.focusIndicator) {
     const focusMatch = activeNodes.find(
       (n) => n.label.toLowerCase() === options.focusIndicator?.trim().toLowerCase(),
@@ -377,12 +528,14 @@ export function buildIocGraphData(
     }
   }
 
-  // Compute connection counts for active graph
+  // Compute connection counts & shared hubs for active graph
   const degreeMap = new Map<string, number>();
   for (const l of activeLinks) {
     degreeMap.set(l.sourceId, (degreeMap.get(l.sourceId) ?? 0) + 1);
     degreeMap.set(l.targetId, (degreeMap.get(l.targetId) ?? 0) + 1);
   }
+
+  const { hubIds: finalHubIds, bridges: sharedBridges } = computeSharedHubs(activeNodes, activeLinks);
 
   const countsByType: Record<IocNodeType, number> = {
     ip: 0,
@@ -396,6 +549,7 @@ export function buildIocGraphData(
     countsByType[n.type] += 1;
     return {
       ...n,
+      isSharedHub: finalHubIds.has(n.id),
       connectionCount: degreeMap.get(n.id) ?? 0,
     };
   });
@@ -404,6 +558,9 @@ export function buildIocGraphData(
     nodes: finalNodes,
     links: activeLinks,
     queriedIndicators,
+    sharedHubIds: Array.from(finalHubIds),
+    sharedBridges,
+    sharedHubCount: sharedBridges.length,
     countsByType,
   };
 }

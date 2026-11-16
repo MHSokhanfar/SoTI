@@ -453,6 +453,8 @@ export default function App() {
             theme={theme}
             navigationTarget={reportsNav}
             currentResults={investigationState.results}
+            recentInvestigations={recentHistory}
+            dispatchedEmailAlerts={dispatchedEmailAlerts}
             activeRegionFilter={recentRegionFilter}
             onFilterRecentByRegion={(regionLabel, options) => {
               setRecentRegionFilter(regionLabel);

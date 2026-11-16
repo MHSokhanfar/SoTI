@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildIocGraphData,
+  csvRowsToLookupResults,
   formatIocClipboardText,
   formatIocGroupClipboardText,
+  mergeGraphLookupResults,
 } from './iocGraph';
 import type { LookupResult } from './indicators';
 
@@ -233,3 +235,80 @@ test('formatIocClipboardText and formatIocGroupClipboardText produce concise ana
   assert.ok(grouped.startsWith('1.2.3.4 [IP]\n- VirusTotal: Malicious (18/91)'));
   assert.ok(grouped.includes('- AbuseIPDB: Malicious (95%)'));
 });
+
+test('buildIocGraphData spots shared domains across IPs and shared malware families across hashes', () => {
+  const csvRows = [
+    {
+      source: 'VirusTotal',
+      indicator: '192.0.2.10',
+      type: 'ip',
+      status: 'ok',
+      verdict: 'Malicious',
+      score: '12/91',
+      summary: 'C2 IP 1',
+      details: JSON.stringify({ Domain: 'shared-c2.example' }),
+      link: '',
+    },
+    {
+      source: 'VirusTotal',
+      indicator: '192.0.2.20',
+      type: 'ip',
+      status: 'ok',
+      verdict: 'Malicious',
+      score: '9/91',
+      summary: 'C2 IP 2',
+      details: JSON.stringify({ Domain: 'shared-c2.example' }),
+      link: '',
+    },
+    {
+      source: 'ThreatFox',
+      indicator: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      type: 'hash',
+      status: 'ok',
+      verdict: 'Malicious',
+      score: '95%',
+      summary: 'Payload A',
+      details: JSON.stringify({ Malware: 'AgentTesla' }),
+      link: '',
+    },
+    {
+      source: 'ThreatFox',
+      indicator: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      type: 'hash',
+      status: 'ok',
+      verdict: 'Malicious',
+      score: '90%',
+      summary: 'Payload B',
+      details: JSON.stringify({ 'Malware Family': 'AgentTesla' }),
+      link: '',
+    },
+    {
+      source: 'VirusTotal',
+      indicator: '8.8.4.4',
+      type: 'ip',
+      status: 'ok',
+      verdict: 'Clean',
+      score: '0/91',
+      summary: 'Clean DNS',
+      details: JSON.stringify({}),
+      link: '',
+    },
+  ];
+
+  const converted = csvRowsToLookupResults(csvRows);
+  assert.equal(converted.length, 5);
+
+  const merged = mergeGraphLookupResults([], csvRows);
+  const graph = buildIocGraphData(merged);
+
+  assert.ok(graph.sharedHubIds.includes('domain:shared-c2.example'));
+  assert.ok(graph.sharedHubIds.includes('malware:agenttesla'));
+  assert.ok(graph.sharedHubCount >= 2);
+
+  const sharedOnly = buildIocGraphData(merged, { sharedOnly: true });
+  assert.equal(sharedOnly.nodes.some((n) => n.id === 'ip:8.8.4.4'), false);
+  assert.ok(sharedOnly.nodes.some((n) => n.id === 'ip:192.0.2.10'));
+  assert.ok(sharedOnly.nodes.some((n) => n.id === 'ip:192.0.2.20'));
+  assert.ok(sharedOnly.nodes.some((n) => n.id === 'malware:agenttesla'));
+});
+

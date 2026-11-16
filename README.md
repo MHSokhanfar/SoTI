@@ -160,7 +160,9 @@ Then open **[http://localhost:3000](http://localhost:3000)**.
      - **Watchlist**: Monitor specific IOCs persistently across browser reloads—add indicators manually or toggle **`Watch`** / **`Watching`** on any results row or IOC card, run **Check Updates** on demand (or let Live Mode / enrichment polls re-evaluate monitored IOCs), view status/score transition deltas (`Verdict Clean -> Malicious · Score 0 -> 79`), and clear unread counters from the red **notification badge** on the Watchlist tab.
 
 2. **Reports (`Alt+2`)**
-   - Review SOC **Quick Stats** KPIs, verdict distribution charts, **30-day alert trendline**, D3 **Real-Time Threat Landscape World Map**, and interactive D3 **Geographic Region IOC Heatmap**.
+   - Review SOC **Quick Stats** KPIs, the real-time **Live Activity** scrollable feed, verdict distribution charts, **30-day alert trendline**, D3 **Relationship Graph**, D3 **Real-Time Threat Landscape World Map**, and interactive D3 **Geographic Region IOC Heatmap**.
+   - **Live Activity Scrollable Feed (`LiveActivityFeed`)**: Streams real-time **Threat Alerts** (high-confidence detections and threshold emails), **Investigations** (completed enrichments and saved CSV runs), and **System Events** (`logs/soti.log` telemetry and rate-limit events) over Server-Sent Events (`/api/activity/stream`) into a bounded scrollable feed (`max-h-[300px] overflow-y-auto`). Filter by category tabs (`All Activity`, `Threat Alerts`, `Investigations`, `System Events`), search inline, pause/resume the live stream, or click **Filter IOC** / **Open Run** to pivot immediately.
+   - **Dashboard Relationship Graph (`RelationshipGraphWidget`)**: Interactive D3 force-directed network map connecting IPs, shared domains, file hashes, malware families, and ASN infrastructure across **`All Runs & Active`**, **`Selected Run`**, or **`Active Session`**. Toggle **`Shared Links Only`** or click any **`Shared Infrastructure Hubs`** spotlight button (`1.2.3.4`, `evil.com`, `eicar.com`, etc.) to highlight cross-indicator hubs with dashed amber rings and inspect connected entities with **Copy Value** and **Filter Reports** actions.
    - **Real-Time D3 World Map (`ThreatLandscapeWidget`)**: Displays geolocated active IOC origin points overlaid on a Natural Earth projection with optional 30-second **Real-Time Sync** polling; hover any **continental landmass region** or **origin marker** to inspect live threat counts, peak confidence score, and top source countries, or switch scopes (`Active IOCs (Real-Time)`, `All Runs`, `Selected Run`, `Current Investigation`) and confidence thresholds.
    - Click any geographic region label or cell on the heatmap and choose **Filter Recent Investigations** to pivot directly to matching IOCs in the Investigate sidebar.
    - Click **Generate Summary** to draft a natural-language executive summary via Gemini AI (`GEMINI_API_KEY` server-side).
@@ -231,6 +233,8 @@ python main.py --remove-schedule <SCHEDULE_ID>
 
 ## 7. Recently Added Features
 
+- **Real-Time `Live Activity` Scrollable Feed (`LiveActivityFeed` & `/api/activity/stream`)**: Scrollable dashboard event stream backed by Server-Sent Events (SSE) and `/api/activity` snapshot aggregation that updates in real time whenever threat alerts trigger, enrichments complete, CSV reports are saved, or provider logs record telemetry—complete with stream pause/resume, category tabs (`Threat Alerts`, `Investigations`, `System Events`), search filtering, and quick **Filter IOC / Open Run** pivots.
+- **Dashboard D3 `Relationship Graph` (`RelationshipGraphWidget` & `iocGraph`)**: Force-directed D3 network visualization uniting IPs, shared domains, file hashes, malware families (`LummaStealer`, `CobaltStrike`, `AgentTesla`, etc.), and ASN hosts across runs and the active session, featuring **`Shared Links Only`** hub filtering, clickable **`Shared Infrastructure Hubs`** spotlight chips, dashed amber hub rings, zoom/drag physics, and a **Selected Entity Inspector**.
 - **Risk Threshold Confidence Slider (`InvestigateView` & `riskScoring`)**: Persistent `0–100` minimum confidence slider with quick-jump presets (`All`, `25+`, `50+`, `75+`), active filter banner (`Hidden X low-risk`), and one-click reset that hides low-impact IOCs from both the **Summary Matrix** and **Unified Batch** tables across Standard and Bulk Input modes.
 - **Per-Row Copy to Clipboard Quick Action (`InvestigateView`)**: Dedicated inline clipboard icon button (`Copy indicator value`) placed beside every indicator in both the **Summary Matrix** and **Unified Batch** results tables, enabling instant one-click copying of raw IOCs into SIEMs, firewalls, or EDR tools with visual confirmation.
 - **Real-Time D3 World Map Visualization (`ThreatLandscapeWidget`)**: Interactive Natural Earth world map plotting active IOC origin points with **Real-Time Sync** auto-polling, hover tooltips across **continental landmass regions** and **origin markers** displaying live threat counts and top countries, plus risk threshold and scope filters.
@@ -261,6 +265,14 @@ All screenshots below were captured directly from the running SoTI Web Workbench
 ### Results Matrix, Risk Threshold Slider, Sparklines & Quick Copy
 ![SoTI Results Matrix with Risk Threshold and Copy Actions](docs/screenshots/investigate-results-matrix.png)
 *Enriched **Summary Matrix** paired with the **Risk Threshold** confidence filter bar (`0–100` slider and `All`, `25+`, `50+`, `75+` presets), color-coded **Confidence Score Legend**, per-row inline **Copy to Clipboard** buttons beside every indicator value, **Trend** confidence sparklines, **`+ Tag`** / **`Watch`** triage controls, and **Export to CSV / Download JSON / Export Full Session** buttons.*
+
+### Real-Time `Live Activity` Scrollable Feed (`Reports` Dashboard)
+![SoTI Live Activity Feed](docs/screenshots/dashboard-live-activity.png)
+*Real-time **Live Activity** feed mounted beneath the SOC **Quick Stats** KPI cards on the **Reports** dashboard, showing **Live Stream Active** SSE status, alert/run/system-event counters, category filter tabs (`All Activity`, `Threat Alerts`, `Investigations`, `System Events`), inline search, and direct **Filter IOC** / **Open Run** pivots.*
+
+### Dashboard D3 `Relationship Graph` & Shared Infrastructure Hubs
+![SoTI D3 Relationship Graph](docs/screenshots/dashboard-relationship-graph.png)
+*Force-directed D3 **Relationship Graph** linking IPs, shared domains (`evil.com`), malicious file hashes (`44d88612fea8a8f36de82e1278abb02f` / `eicar.com`), ASNs, and malware families (`LummaStealer`, `CobaltStrike`, `AgentTesla`) with **Shared Infrastructure Hubs** spotlight buttons, **Shared Links Only** filtering, and the **Selected Entity Inspector**.*
 
 ### Real-Time D3 Threat Landscape World Map (`Reports` Tab)
 ![SoTI Real-Time D3 Threat Landscape World Map](docs/screenshots/reports-world-map.png)
@@ -327,10 +339,12 @@ SoTI/
 │   │   ├── IocNetworkGraph.tsx             # D3 force-directed IOC relationship graph
 │   │   ├── IocRegionHeatmap.tsx            # D3 interactive geographic IOC heatmap & filter
 │   │   ├── KeyboardShortcutsModal.tsx      # Categorized global shortcuts reference modal
+│   │   ├── LiveActivityFeed.tsx            # Real-time SSE scrollable alerts & telemetry feed
 │   │   ├── LogsView.tsx                    # Real-time audit & failover log viewer
 │   │   ├── NotificationCenter.tsx          # Quota warning & workspace alert drawer
 │   │   ├── RecentInvestigationsSidebar.tsx # Context-menu history, pin/rename/tag/region filter
-│   │   ├── ReportsView.tsx                 # KPIs, charts, AI summary, PDF/CSV export & Share modal
+│   │   ├── RelationshipGraphWidget.tsx     # Dashboard D3 force-directed IOC relationship graph
+│   │   ├── ReportsView.tsx                 # KPIs, charts, Live Activity, Relationship Graph, AI summary & Share modal
 │   │   ├── ScheduledView.tsx               # Recurring schedule manager UI
 │   │   ├── ThreatLandscapeWidget.tsx       # Real-time D3 world map, region hover & threat clusters
 │   │   ├── TopBar.tsx                      # Navigation tabs, global search, provider status, theme
@@ -351,6 +365,7 @@ SoTI/
 │       ├── iocTags.ts / .test.ts           # Custom IOC tag CRUD & filter logic
 │       ├── iocTimeline.ts / .test.ts       # Chronological timestamp extractor & sorter
 │       ├── keyboardShortcuts.ts / .test.ts # Shortcut key matching & spec registry
+│       ├── liveActivity.ts / .test.ts      # Real-time activity event parsers, mergers & filters
 │       ├── livePolling.ts / .test.ts       # Live Mode polling intervals, countdown & delta tracking
 │       ├── notifications.ts / .test.ts     # Quota threshold & alert notifications
 │       ├── quota.ts / .test.ts             # Daily quota & failover calculation

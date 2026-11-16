@@ -60,9 +60,13 @@ import {
   type SharedReportSnapshot,
 } from '../utils/reportSharing';
 import { copyToClipboard } from '../utils/clipboard';
+import type { EmailAlertRecord } from '../utils/emailAlerts';
 import type { LookupResult } from '../utils/indicators';
+import type { RecentInvestigationEntry } from '../utils/investigationHistory';
 import type { ThemeMode } from '../utils/theme';
 import { IocRegionHeatmap } from './IocRegionHeatmap';
+import { LiveActivityFeed } from './LiveActivityFeed';
+import { RelationshipGraphWidget } from './RelationshipGraphWidget';
 import { ThreatLandscapeWidget } from './ThreatLandscapeWidget';
 
 type ChartScope = 'malicious_clean' | 'all_verdicts';
@@ -86,6 +90,8 @@ interface ReportsViewProps {
   theme?: ThemeMode;
   navigationTarget?: ReportsNavigationTarget | null;
   currentResults?: LookupResult[];
+  recentInvestigations?: RecentInvestigationEntry[];
+  dispatchedEmailAlerts?: EmailAlertRecord[];
   activeRegionFilter?: string | null;
   onFilterRecentByRegion?: (regionLabel: string | null, options?: { navigate?: boolean }) => void;
   sharedReportSnapshot?: SharedReportSnapshot | null;
@@ -179,6 +185,8 @@ export function ReportsView({
   theme = 'light',
   navigationTarget,
   currentResults = [],
+  recentInvestigations = [],
+  dispatchedEmailAlerts = [],
   activeRegionFilter = null,
   onFilterRecentByRegion,
   sharedReportSnapshot = null,
@@ -1004,12 +1012,27 @@ export function ReportsView({
           Loading reports...
         </div>
       ) : reports.length === 0 ? (
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-6 py-12 text-center">
-          <FileSpreadsheet className="mx-auto h-8 w-8 text-slate-400 dark:text-slate-500" aria-hidden="true" />
-          <h2 className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">No CSV reports yet</h2>
-          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Run an enrichment lookup from the Investigate tab to generate a report.
-          </p>
+        <div className="space-y-6">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-6 py-12 text-center">
+            <FileSpreadsheet className="mx-auto h-8 w-8 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+            <h2 className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">No CSV reports yet</h2>
+            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+              Run an enrichment lookup from the Investigate tab to generate a report.
+            </p>
+          </div>
+
+          <LiveActivityFeed
+            reports={reports}
+            recentInvestigations={recentInvestigations}
+            dispatchedEmailAlerts={dispatchedEmailAlerts}
+            onInspectIndicator={(indicator) => {
+              setVerdictFilter('All');
+              setSearchQuery(indicator);
+            }}
+            onSelectReport={(reportName) => {
+              selectReport(reportName);
+            }}
+          />
         </div>
       ) : (
         <>
@@ -1059,6 +1082,19 @@ export function ReportsView({
               </div>
             </dl>
           </section>
+
+          <LiveActivityFeed
+            reports={reports}
+            recentInvestigations={recentInvestigations}
+            dispatchedEmailAlerts={dispatchedEmailAlerts}
+            onInspectIndicator={(indicator) => {
+              setVerdictFilter('All');
+              setSearchQuery(indicator);
+            }}
+            onSelectReport={(reportName) => {
+              selectReport(reportName);
+            }}
+          />
 
           {(aiSummary || aiSummaryError || generatingSummary) && (
             <section
@@ -1480,6 +1516,19 @@ export function ReportsView({
               </div>
             </section>
           </div>
+
+          <RelationshipGraphWidget
+            allRunRows={allRunRows}
+            selectedRunRows={rows}
+            selectedRunName={selectedName}
+            currentResults={currentResults}
+            theme={theme}
+            loading={loadingHeatmapRows}
+            onInspectIndicator={(indicator) => {
+              setVerdictFilter('All');
+              setSearchQuery(indicator);
+            }}
+          />
 
           <ThreatLandscapeWidget
             allRunRows={allRunRows}

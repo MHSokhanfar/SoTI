@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -41,6 +42,13 @@ import {
   sanitizeSelectedReportNames,
   summarizeReportVerdicts,
 } from './src/utils/reportsAnalytics';
+import {
+  buildActivityFromEmailAlert,
+  buildActivityFromReportMeta,
+  mergeLiveActivityEvents,
+  parseLogLineToActivity,
+  type LiveActivityEvent,
+} from './src/utils/liveActivity';
 import {
   buildCustomEndpointUrl,
   buildHeartbeatEndpoint,
@@ -355,6 +363,7 @@ async function dispatchThresholdEmail(params: {
   };
 
   await appendEmailAlertHistory(record);
+  emitLiveActivity(buildActivityFromEmailAlert(record));
   await appendLog(
     deliveryStatus === 'failed' ? 'ERROR' : 'INFO',
     `EMAIL ALERT (${deliveryStatus.toUpperCase()} · ${deliveryMethod}) | To: ${record.recipients.join(', ')} | ${record.subject}`,
@@ -433,10 +442,19 @@ function formatLogTimestamp(d = new Date()): string {
   );
 }
 
+const activityBus = new EventEmitter();
+activityBus.setMaxListeners(100);
+
+function emitLiveActivity(event: LiveActivityEvent | null) {
+  if (!event) return;
+  activityBus.emit('activity', event);
+}
+
 async function appendLog(level: 'INFO' | 'WARNING' | 'ERROR', message: string) {
   await ensureDirs();
   const line = `${formatLogTimestamp()} | ${level} | ${message}\n`;
   await fs.appendFile(LOG_FILE, line, 'utf-8');
+  emitLiveActivity(parseLogLineToActivity(line.trim()));
 }
 
 const PLACEHOLDER_KEYS = new Set([
@@ -2090,6 +2108,41 @@ async function createApp() {
       reportFile: filename,
     });
 
+    const uniqueIocs = Array.from(new Set(results.map((r) => r.indicator).filter(Boolean)));
+    const malCount = results.filter((r) => r.verdict === 'Malicious').length;
+    const susCount = results.filter((r) => r.verdict === 'Suspicious').length;
+    const cleanCount = results.filter((r) => r.verdict === 'Clean').length;
+    const confItems = Array.from(computeAllIocConfidenceScores(results).values());
+
+    if (malCount > 0 || confItems.some((i) => i.confidenceScore !== null && i.confidenceScore >= 60)) {
+      const topThreat = confItems
+        .filter((i) => i.confidenceScore !== null)
+        .sort((a, b) => (b.confidenceScore ?? 0) - (a.confidenceScore ?? 0))[0];
+      emitLiveActivity({
+        id: `batch-threat-${now.getTime()}-${uniqueIocs[0] || 'ioc'}`,
+        category: 'threat_alert',
+        severity: (topThreat?.confidenceScore ?? 0) >= 75 || malCount >= 2 ? 'critical' : 'warning',
+        title: `Threat Telemetry Detected (${malCount} malicious · ${susCount} suspicious)`,
+        detail: `${uniqueIocs.slice(0, 3).join(', ')}${uniqueIocs.length > 3 ? ` +${uniqueIocs.length - 3} more` : ''}${topThreat ? ` · Peak ${topThreat.confidenceScore}/100` : ''}`,
+        timestamp: now.toISOString(),
+        ...(topThreat ? { indicator: topThreat.indicator, confidenceScore: topThreat.confidenceScore ?? undefined } : {}),
+        ...(filename ? { reportName: filename } : {}),
+      });
+    }
+
+    emitLiveActivity({
+      id: `batch-run-${now.getTime()}-${filename || 'poll'}`,
+      category: 'investigation',
+      severity: malCount > 0 ? 'warning' : 'success',
+      title: opts.backgroundPoll
+        ? `Live Mode Refresh (${uniqueIocs.length} IOC${uniqueIocs.length === 1 ? '' : 's'})`
+        : `Completed ${mode === 'live' ? 'Live API' : 'Sample'} Investigation`,
+      detail: `${results.length} lookup${results.length === 1 ? '' : 's'} · ${malCount} malicious, ${susCount} suspicious, ${cleanCount} clean${filename ? ` · ${filename}` : ''}`,
+      timestamp: now.toISOString(),
+      ...(uniqueIocs[0] ? { indicator: uniqueIocs[0] } : {}),
+      ...(filename ? { reportName: filename } : {}),
+    });
+
     const latestLedger = await loadQuotaLedger(settings);
     return {
       ok: true,
@@ -2694,6 +2747,96 @@ async function createApp() {
     } catch {
       res.json({ lines: [] });
     }
+  });
+
+  app.get('/api/activity', async (_req, res) => {
+    await ensureDirs();
+    const collected: LiveActivityEvent[] = [];
+
+    try {
+      const logContent = await fs.readFile(LOG_FILE, 'utf-8');
+      const recentLines = logContent
+        .split(/\r?\n/)
+        .filter((l) => l.trim().length > 0)
+        .slice(-80);
+      for (const line of recentLines) {
+        const parsed = parseLogLineToActivity(line);
+        if (parsed) collected.push(parsed);
+      }
+    } catch {
+      // Ignore missing log file
+    }
+
+    try {
+      const alertHistory = await loadEmailAlertHistory();
+      for (const record of alertHistory.slice(0, 20)) {
+        collected.push(buildActivityFromEmailAlert(record));
+      }
+    } catch {
+      // Ignore unreadable alerts history
+    }
+
+    try {
+      const entries = await fs.readdir(REPORTS_DIR);
+      const csvNames = entries.filter((f) => f.endsWith('.csv')).sort().reverse().slice(0, 15);
+      for (const name of csvNames) {
+        try {
+          const full = path.join(REPORTS_DIR, name);
+          const stat = await fs.stat(full);
+          const text = await fs.readFile(full, 'utf-8');
+          const rows = parseCsvFile(text);
+          collected.push(
+            buildActivityFromReportMeta({
+              name,
+              sizeBytes: stat.size,
+              modifiedAt: stat.mtime.toISOString(),
+              rowCount: rows.length,
+              verdicts: summarizeReportVerdicts(rows),
+              indicators: Array.from(new Set(rows.map((r) => r.indicator).filter(Boolean))),
+            }),
+          );
+        } catch {
+          // Ignore individual unreadable CSV
+        }
+      }
+    } catch {
+      // Ignore missing reports dir
+    }
+
+    const events = mergeLiveActivityEvents([], collected, 80);
+    res.json({ events });
+  });
+
+  app.get('/api/activity/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const sendEvent = (ev: LiveActivityEvent) => {
+      try {
+        res.write(`event: activity\ndata: ${JSON.stringify(ev)}\n\n`);
+      } catch {
+        // Client disconnected
+      }
+    };
+
+    const listener = (ev: LiveActivityEvent) => sendEvent(ev);
+    activityBus.on('activity', listener);
+
+    res.write(`event: ready\ndata: ${JSON.stringify({ connectedAt: new Date().toISOString() })}\n\n`);
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': keepalive\n\n');
+      } catch {
+        // Client disconnected
+      }
+    }, 25_000);
+
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      activityBus.off('activity', listener);
+    });
   });
 
   if (process.env.NODE_ENV === 'production') {
