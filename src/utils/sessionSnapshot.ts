@@ -1,4 +1,4 @@
-import type { InvestigationAnalysisMode } from './bulkAnalysis';
+import type { BatchProcessingStrategy, InvestigationAnalysisMode } from './bulkAnalysis';
 import type {
   IndicatorType,
   LookupResult,
@@ -16,6 +16,7 @@ export const MAX_SNAPSHOT_TOKEN_LENGTH = 140_000;
 
 export interface SessionSnapshotInput {
   analysisMode: InvestigationAnalysisMode;
+  batchStrategy?: BatchProcessingStrategy;
   mode: 'sample' | 'live';
   lastRunMode: 'sample' | 'live' | null;
   rawInput: string;
@@ -40,6 +41,7 @@ export interface SessionSnapshotInput {
 export interface DecodedSessionSnapshot {
   createdAt: string;
   analysisMode: InvestigationAnalysisMode;
+  batchStrategy: BatchProcessingStrategy;
   mode: 'sample' | 'live';
   lastRunMode: 'sample' | 'live' | null;
   rawInput: string;
@@ -80,6 +82,7 @@ interface WireSessionSnapshotV1 {
   v: 1;
   ca: string;
   am: InvestigationAnalysisMode;
+  bs?: BatchProcessingStrategy;
   m: 'sample' | 'live';
   lm: 'sample' | 'live' | null;
   raw: string;
@@ -235,6 +238,7 @@ export function encodeSessionSnapshot(input: SessionSnapshotInput): {
         ? Math.max(0, Math.min(100, Math.round(input.riskThreshold)))
         : 0,
     ts: input.tableSort ?? null,
+    bs: input.batchStrategy === 'sequential' ? 'sequential' : 'concurrent',
   };
 
   let truncatedDetails = false;
@@ -388,6 +392,7 @@ export function decodeSessionSnapshot(rawToken: string): DecodedSessionSnapshot 
       createdAt:
         typeof parsed.ca === 'string' && parsed.ca ? parsed.ca : new Date().toISOString(),
       analysisMode: parsed.am === 'bulk' ? 'bulk' : 'standard',
+      batchStrategy: parsed.bs === 'sequential' ? 'sequential' : 'concurrent',
       mode: parsed.m === 'live' ? 'live' : 'sample',
       lastRunMode:
         parsed.lm === 'live' || parsed.lm === 'sample' ? parsed.lm : null,

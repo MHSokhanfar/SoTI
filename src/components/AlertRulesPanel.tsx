@@ -8,11 +8,14 @@ import {
   Play,
   Plus,
   ShieldAlert,
+  SlidersHorizontal,
   Trash2,
   Zap,
 } from 'lucide-react';
 import type { LookupResult } from '../utils/indicators';
 import {
+  clampAlertConfidenceThreshold,
+  countIndicatorsMeetingConfidenceThreshold,
   describeAlertRuleSummary,
   validateAndNormalizeAlertRuleDraft,
   type AlertRuleChannel,
@@ -27,6 +30,8 @@ import { usePrivacyMode } from './PrivacyModeContext';
 interface AlertRulesPanelProps {
   compact?: boolean;
   rules: CustomAlertRule[];
+  confidenceThreshold?: number;
+  onChangeConfidenceThreshold?: (next: number) => void;
   history: AlertRuleTriggerHistoryEntry[];
   currentResults?: readonly LookupResult[];
   onSaveRule: (rule: CustomAlertRule) => void;
@@ -57,7 +62,15 @@ const CHANNEL_OPTIONS: { value: AlertRuleChannel; label: string }[] = [
   { value: 'both', label: 'Desktop + Email' },
 ];
 
-const SCORE_PRESETS = [25, 50, 75, 90];
+const SCORE_PRESETS = [0, 25, 50, 75, 90];
+
+function describeConfidenceTier(threshold: number): string {
+  if (threshold <= 0) return 'All Scored';
+  if (threshold < 40) return 'Low+';
+  if (threshold < 65) return 'Moderate+';
+  if (threshold < 85) return 'High+';
+  return 'Critical Only';
+}
 
 function formatRuleTimestamp(iso: string | null): string {
   if (!iso) return 'Never triggered';
@@ -69,6 +82,8 @@ function formatRuleTimestamp(iso: string | null): string {
 export function AlertRulesPanel({
   compact = false,
   rules,
+  confidenceThreshold = 0,
+  onChangeConfidenceThreshold,
   history,
   currentResults = [],
   onSaveRule,
@@ -228,6 +243,11 @@ export function AlertRulesPanel({
   }
 
   const activeCount = rules.filter((r) => r.enabled).length;
+  const resolvedConfidenceThreshold = clampAlertConfidenceThreshold(confidenceThreshold, 0);
+  const confidenceMatchStats =
+    currentResults.length > 0
+      ? countIndicatorsMeetingConfidenceThreshold(currentResults, resolvedConfidenceThreshold)
+      : null;
 
   return (
     <div
@@ -314,6 +334,85 @@ export function AlertRulesPanel({
         </div>
       )}
 
+      {/* Global Incoming Confidence Threshold Gate */}
+      <div
+        data-testid="alert-rules-confidence-threshold-card"
+        className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/70 px-3.5 py-3 space-y-2"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label
+            htmlFor="alert-rules-confidence-threshold-slider"
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-900 dark:text-slate-100"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5 text-red-600 dark:text-red-400" aria-hidden="true" />
+            <span>Confidence Threshold</span>
+          </label>
+          <div className="flex items-center gap-2 font-mono text-xs tabular-nums">
+            <span
+              data-testid="alert-rules-confidence-threshold-value"
+              className="font-semibold text-slate-900 dark:text-slate-100"
+            >
+              ≥ {resolvedConfidenceThreshold}/100
+            </span>
+            <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
+              ·
+            </span>
+            <span className="font-sans text-[11px] font-medium text-slate-600 dark:text-slate-400">
+              {describeConfidenceTier(resolvedConfidenceThreshold)}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <input
+            id="alert-rules-confidence-threshold-slider"
+            data-testid="alert-rules-confidence-threshold-slider"
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={resolvedConfidenceThreshold}
+            onChange={(e) =>
+              onChangeConfidenceThreshold?.(clampAlertConfidenceThreshold(e.target.value, 0))
+            }
+            aria-label="Minimum Confidence Threshold for Alert Rules"
+            className="h-1.5 flex-1 cursor-pointer appearance-none rounded-lg bg-slate-200 dark:bg-slate-800 accent-red-600"
+          />
+          <div className="flex items-center gap-1 shrink-0">
+            {SCORE_PRESETS.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                data-testid={`confidence-threshold-preset-${preset}`}
+                onClick={() => onChangeConfidenceThreshold?.(preset)}
+                className={`rounded px-2 py-0.5 font-mono text-[11px] tabular-nums cursor-pointer transition-colors ${
+                  resolvedConfidenceThreshold === preset
+                    ? 'bg-red-600 text-white font-semibold'
+                    : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                {preset === 0 ? 'All' : `${preset}+`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+          <span>
+            Filter incoming investigation results by minimum confidence score (0–100) before triggering any alerts or notifications.
+          </span>
+          {confidenceMatchStats && confidenceMatchStats.totalScored > 0 && (
+            <span
+              data-testid="alert-rules-confidence-match-count"
+              className="font-mono tabular-nums font-medium text-slate-700 dark:text-slate-300"
+            >
+              {confidenceMatchStats.passing} of {confidenceMatchStats.totalScored} active IOCs pass ≥{' '}
+              {resolvedConfidenceThreshold}/100
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Create / Edit Rule Form */}
       {formOpen && (
         <form
@@ -383,32 +482,55 @@ export function AlertRulesPanel({
                 htmlFor="alert-rule-score"
                 className="block text-[11px] font-medium text-slate-700 dark:text-slate-300"
               >
-                Min Risk Score (1–100)
+                Rule Confidence Threshold (0–100)
               </label>
-              <div className="mt-1 flex items-center gap-1.5">
-                <input
-                  id="alert-rule-score"
-                  data-testid="alert-rule-score-input"
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={minRiskScore}
-                  onChange={(e) => setMinRiskScore(Number.parseInt(e.target.value || '50', 10))}
-                  className="w-20 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums focus:border-red-600 focus:outline-none"
-                />
+              <div className="mt-1 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="alert-rule-score-slider"
+                    data-testid="alert-rule-score-slider"
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={clampAlertConfidenceThreshold(minRiskScore, 50)}
+                    onChange={(e) =>
+                      setMinRiskScore(clampAlertConfidenceThreshold(e.target.value, 50))
+                    }
+                    aria-label="Rule Confidence Threshold Slider"
+                    className="h-1.5 flex-1 cursor-pointer appearance-none rounded-lg bg-slate-200 dark:bg-slate-800 accent-red-600"
+                  />
+                  <input
+                    id="alert-rule-score"
+                    data-testid="alert-rule-score-input"
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={minRiskScore}
+                    onChange={(e) =>
+                      setMinRiskScore(
+                        clampAlertConfidenceThreshold(
+                          e.target.value === '' ? 0 : Number.parseInt(e.target.value, 10),
+                          0,
+                        ),
+                      )
+                    }
+                    className="w-16 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums focus:border-red-600 focus:outline-none"
+                  />
+                </div>
                 <div className="flex items-center gap-1">
                   {SCORE_PRESETS.map((preset) => (
                     <button
                       key={preset}
                       type="button"
                       onClick={() => setMinRiskScore(preset)}
-                      className={`rounded px-2 py-1 font-mono text-[11px] tabular-nums cursor-pointer transition-colors ${
+                      className={`rounded px-2 py-0.5 font-mono text-[11px] tabular-nums cursor-pointer transition-colors ${
                         minRiskScore === preset
                           ? 'bg-red-600 text-white font-semibold'
                           : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                       }`}
                     >
-                      {preset}+
+                      {preset === 0 ? 'All' : `${preset}+`}
                     </button>
                   ))}
                 </div>

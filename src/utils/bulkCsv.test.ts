@@ -88,3 +88,35 @@ test('isSupportedIndicatorFile and extractIndicatorsFromFile dispatch CSV and TX
   assert.equal(fromCsv.sourceFormat, 'csv');
   assert.equal(fromCsv.rawText, '8.8.8.8');
 });
+
+test('extractIndicatorsFromCsv discovers all columns and extracts strictly from a designated column', () => {
+  const csv = [
+    'timestamp,src_ip,target_domain,payload_sha256,analyst_note',
+    '2026-11-16,1[.]2[.]3[.]4,evil[.]com,44d88612fea8a8f36de82e1278abb02f,c2 beacon',
+    '2026-11-16,8.8.8.8,sub.example.org,d41d8cd98f00b204e9800998ecf8427e,clean dns check',
+  ].join('\n');
+
+  const autoRes = extractIndicatorsFromCsv(csv);
+  assert.equal(autoRes.hasHeaderRow, true);
+  assert.equal(autoRes.availableColumns?.length, 5);
+  assert.equal(autoRes.availableColumns?.[1].name, 'src_ip');
+  assert.equal(autoRes.availableColumns?.[1].validCount, 2);
+  assert.equal(autoRes.availableColumns?.[2].name, 'target_domain');
+  assert.equal(autoRes.availableColumns?.[2].validCount, 2);
+  assert.equal(autoRes.availableColumns?.[4].validCount, 0);
+
+  const domainOnly = extractIndicatorsFromFile(csv, 'multi_col.csv', 'text/csv', {
+    designatedColumn: 'target_domain',
+  });
+  assert.equal(domainOnly.designatedColumn, 'target_domain');
+  assert.deepEqual(domainOnly.indicators, ['evil.com', 'sub.example.org']);
+  assert.deepEqual(domainOnly.breakdown, { ip: 0, domain: 2, hash: 0 });
+
+  const hashOnly = extractIndicatorsFromCsv(csv, { designatedColumn: 'payload_sha256' });
+  assert.equal(hashOnly.designatedColumn, 'payload_sha256');
+  assert.deepEqual(hashOnly.indicators, [
+    '44d88612fea8a8f36de82e1278abb02f',
+    'd41d8cd98f00b204e9800998ecf8427e',
+  ]);
+  assert.deepEqual(hashOnly.breakdown, { ip: 0, domain: 0, hash: 2 });
+});

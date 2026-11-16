@@ -84,11 +84,14 @@ import {
 import {
   buildAlertRuleHistoryEntries,
   buildDesktopNotificationsFromHits,
+  clampAlertConfidenceThreshold,
   evaluateCustomAlertRules,
   formatDesktopBrowserNotificationContent,
+  loadAlertConfidenceThreshold,
   loadAlertRuleHistory,
   loadCustomAlertRules,
   loadDesktopRuleNotifications,
+  saveAlertConfidenceThreshold,
   saveAlertRuleHistory,
   saveCustomAlertRules,
   saveDesktopRuleNotifications,
@@ -97,6 +100,7 @@ import {
   type CustomAlertRule,
   type DesktopRuleNotification,
 } from './utils/alertRules';
+import { resolveInitialBatchStrategy, saveBatchStrategy } from './utils/bulkAnalysis';
 import {
   loadPrivacyMode,
   maskIndicatorValue,
@@ -146,6 +150,9 @@ export default function App() {
   );
   const [alertRules, setAlertRules] = useState<CustomAlertRule[]>(() =>
     typeof window !== 'undefined' ? loadCustomAlertRules(window.localStorage) : [],
+  );
+  const [alertConfidenceThreshold, setAlertConfidenceThreshold] = useState<number>(() =>
+    typeof window !== 'undefined' ? loadAlertConfidenceThreshold(window.localStorage) : 0,
   );
   const [desktopRuleAlerts, setDesktopRuleAlerts] = useState<DesktopRuleNotification[]>(() =>
     typeof window !== 'undefined' ? loadDesktopRuleNotifications(window.localStorage) : [],
@@ -218,6 +225,8 @@ export default function App() {
     researcherNotes:
       typeof window !== 'undefined' ? loadNotesAutoSaveState(window.localStorage).draftNotes : '',
     analysisMode: 'standard',
+    batchStrategy:
+      typeof window !== 'undefined' ? resolveInitialBatchStrategy(window.localStorage) : 'concurrent',
     livePollingEnabled: false,
     livePollIntervalSec: DEFAULT_LIVE_POLL_SECONDS,
   });
@@ -368,6 +377,18 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      saveAlertConfidenceThreshold(window.localStorage, alertConfidenceThreshold);
+    }
+  }, [alertConfidenceThreshold]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveBatchStrategy(window.localStorage, investigationState.batchStrategy);
+    }
+  }, [investigationState.batchStrategy]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
       saveDesktopRuleNotifications(window.localStorage, desktopRuleAlerts);
     }
   }, [desktopRuleAlerts]);
@@ -418,6 +439,7 @@ export default function App() {
       lastReportFile: decoded.lastReportFile,
       researcherNotes: decoded.researcherNotes,
       analysisMode: decoded.analysisMode,
+      batchStrategy: decoded.batchStrategy,
       activeHistoryId: null,
       livePollingEnabled: false,
     }));
@@ -666,6 +688,7 @@ export default function App() {
       const evaluation = evaluateCustomAlertRules({
         rules: alertRules,
         results,
+        globalConfidenceThreshold: alertConfidenceThreshold,
         mode,
       });
       setAlertRules(evaluation.updatedRules);
@@ -673,15 +696,18 @@ export default function App() {
         void dispatchHits(evaluation.hits, mode, reportFile);
         return {
           matchedRules: evaluation.hits.length,
-          message: `Matched ${evaluation.hits.length} alert rule(s) across active results.`,
+          message: `Matched ${evaluation.hits.length} alert rule(s) across results meeting ≥ ${alertConfidenceThreshold}/100 confidence.`,
         };
       }
       return {
         matchedRules: 0,
-        message: 'Evaluated active rules — no indicators met custom rule criteria.',
+        message:
+          alertConfidenceThreshold > 0
+            ? `Evaluated active rules — no indicators met the ≥ ${alertConfidenceThreshold}/100 confidence threshold and rule criteria.`
+            : 'Evaluated active rules — no indicators met custom rule criteria.',
       };
     },
-    [alertRules, dispatchHits],
+    [alertRules, alertConfidenceThreshold, dispatchHits],
   );
 
   const handleSaveAlertRule = useCallback((rule: CustomAlertRule) => {
@@ -938,6 +964,10 @@ export default function App() {
           emailAlerts={dispatchedEmailAlerts}
           emailAlertsRefreshNonce={emailAlertsRefreshNonce}
           alertRules={alertRules}
+          confidenceThreshold={alertConfidenceThreshold}
+          onChangeConfidenceThreshold={(nextVal) =>
+            setAlertConfidenceThreshold(clampAlertConfidenceThreshold(nextVal, 0))
+          }
           desktopRuleAlerts={desktopRuleAlerts}
           activeDesktopToastIds={activeDesktopToastIds}
           alertRuleHistory={alertRuleHistory}
@@ -1115,6 +1145,17 @@ export default function App() {
                 window.history.replaceState({}, '', url.toString());
               }
             }}
+            onOpenInvestigation={(entry) => {
+              setActiveTab('investigate');
+              setInvestigateNav({
+                historyEntryId: entry.id,
+                nonce: Date.now(),
+              });
+            }}
+            onNavigateToInvestigate={() => {
+              setActiveTab('investigate');
+              setInvestigateFocusNonce((n) => n + 1);
+            }}
           />
         )}
         {activeTab === 'scheduled' && (
@@ -1140,6 +1181,10 @@ export default function App() {
             quota={quotaState}
             emailAlertsRefreshNonce={emailAlertsRefreshNonce}
             alertRules={alertRules}
+            alertConfidenceThreshold={alertConfidenceThreshold}
+            onChangeAlertConfidenceThreshold={(nextVal) =>
+              setAlertConfidenceThreshold(clampAlertConfidenceThreshold(nextVal, 0))
+            }
             alertRuleHistory={alertRuleHistory}
             currentResults={investigationState.results}
             onApiSettingsChange={(next) => {

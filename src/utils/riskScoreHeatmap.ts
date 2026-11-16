@@ -67,6 +67,82 @@ export interface RiskScoreHeatmapModel {
 
 export const RISK_HEATMAP_BANDS: RiskBandId[] = ['High', 'Medium', 'Low'];
 
+export type RiskHeatmapLegendId = RiskBandId | 'Zero';
+
+export interface RiskHeatmapLegendDescriptor {
+  id: RiskHeatmapLegendId;
+  band: RiskBandId | null;
+  title: string;
+  scoreRange: string;
+  minScore: number | null;
+  maxScore: number | null;
+  subTiers: string;
+  classificationRule: string;
+  calculationFormula: string;
+}
+
+export const RISK_HEATMAP_LEGEND_ITEMS: readonly RiskHeatmapLegendDescriptor[] = [
+  {
+    id: 'Zero',
+    band: null,
+    title: '0 IOCs (Unpopulated)',
+    scoreRange: '0 matches',
+    minScore: null,
+    maxScore: null,
+    subTiers: 'Empty cell bucket (count = 0)',
+    classificationRule:
+      'Shown when zero scored IOCs in the column fell inside that risk band. Indicators returning only Error or Unsupported across all providers are excluded from scored buckets.',
+    calculationFormula:
+      'Populated cells scale color saturation from 28% (1 IOC) up to 100% at the highest column bucket count.',
+  },
+  {
+    id: 'High',
+    band: 'High',
+    title: 'High Risk',
+    scoreRange: '50–100',
+    minScore: 50,
+    maxScore: 100,
+    subTiers: 'Critical: 75–100 · High: 50–74',
+    classificationRule:
+      'Includes every IOC with a weighted confidence score of 50 or above; scores of 75–100 are additionally counted as Critical in Posture metrics.',
+    calculationFormula:
+      'Confidence = Sum(providerScore x effectiveWeight) / Sum(effectiveWeight) across VirusTotal (0.35), AbuseIPDB (0.25), ThreatFox (0.20), URLScan (0.18), OTX (0.15), and Shodan (0.12).',
+  },
+  {
+    id: 'Medium',
+    band: 'Medium',
+    title: 'Medium Risk',
+    scoreRange: '25–49',
+    minScore: 25,
+    maxScore: 49,
+    subTiers: 'Moderate / Suspicious: 25–49',
+    classificationRule:
+      'Includes indicators scoring 25–49 from partial suspicious detections, low-volume OTX pulses, or exposed service ports without confirmed malware.',
+    calculationFormula:
+      'Weighted 0–100 average where confirmed findings carry 1.0x weight and clean/not-found specialty feeds carry 0.5x weight.',
+  },
+  {
+    id: 'Low',
+    band: 'Low',
+    title: 'Low Risk',
+    scoreRange: '0–24',
+    minScore: 0,
+    maxScore: 24,
+    subTiers: 'Low / Benign: 0–24',
+    classificationRule:
+      'Includes clean or benign indicators scoring 0–24 with zero malicious detections or negligible telemetry signal.',
+    calculationFormula:
+      'Unmatched lookups (not_found) contribute 0 risk at 0.5x weight so negative specialty checks never mask confirmed threats.',
+  },
+];
+
+export function getRiskHeatmapLegendDescriptor(
+  id: RiskHeatmapLegendId | null | undefined,
+): RiskHeatmapLegendDescriptor | null {
+  if (!id) return null;
+  return RISK_HEATMAP_LEGEND_ITEMS.find((item) => item.id === id) ?? null;
+}
+
 export function classifyRiskBand(confidenceScore: number | null | undefined): RiskBandId | null {
   if (typeof confidenceScore !== 'number' || !Number.isFinite(confidenceScore)) {
     return null;

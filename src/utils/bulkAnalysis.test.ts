@@ -4,9 +4,14 @@ import type { LookupResult } from './indicators';
 import {
   buildUnifiedBatchTable,
   deduplicateBulkInputLines,
+  describeBatchStrategy,
   filterUnifiedBatchRows,
   formatIndicatorsAsNewlines,
   formatUnifiedBatchRowClipboard,
+  normalizeBatchStrategy,
+  resolveInitialBatchStrategy,
+  saveBatchStrategy,
+  shouldRunParallelLookup,
   summarizeBulkInputStats,
 } from './bulkAnalysis';
 
@@ -122,3 +127,25 @@ test('buildUnifiedBatchTable aggregates per-IOC multi-provider columns, verdicts
   assert.ok(clipboardText.includes('VirusTotal: Malicious (25/90)'));
   assert.ok(clipboardText.includes('Tags: C2, Critical'));
 });
+
+test('batch processing strategy helpers normalize, persist, and map to parallel lookup mode', () => {
+  const mem = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      mem.set(k, v);
+    },
+  };
+
+  assert.equal(resolveInitialBatchStrategy(mockStorage), 'concurrent');
+  assert.equal(normalizeBatchStrategy('invalid'), 'concurrent');
+  assert.equal(normalizeBatchStrategy('sequential'), 'sequential');
+
+  saveBatchStrategy(mockStorage, 'sequential');
+  assert.equal(resolveInitialBatchStrategy(mockStorage), 'sequential');
+  assert.equal(shouldRunParallelLookup('sequential'), false);
+  assert.equal(shouldRunParallelLookup('concurrent'), true);
+  assert.match(describeBatchStrategy('sequential'), /rate-limited/i);
+  assert.match(describeBatchStrategy('concurrent'), /parallel/i);
+});
+

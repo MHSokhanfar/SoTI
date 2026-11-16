@@ -8,6 +8,46 @@ import { getTagsForIndicator, type IndicatorTagMap } from './iocTags';
 import { computeAllIocConfidenceScores, type ConfidenceRiskLevel } from './riskScoring';
 
 export type InvestigationAnalysisMode = 'standard' | 'bulk';
+export type BatchProcessingStrategy = 'concurrent' | 'sequential';
+
+export const BATCH_STRATEGY_STORAGE_KEY = 'soti_batch_processing_strategy_v1';
+
+export function normalizeBatchStrategy(raw: unknown): BatchProcessingStrategy {
+  return raw === 'sequential' ? 'sequential' : 'concurrent';
+}
+
+export function resolveInitialBatchStrategy(
+  storage?: Pick<Storage, 'getItem'> | null,
+): BatchProcessingStrategy {
+  if (!storage) return 'concurrent';
+  try {
+    return normalizeBatchStrategy(storage.getItem(BATCH_STRATEGY_STORAGE_KEY));
+  } catch {
+    return 'concurrent';
+  }
+}
+
+export function saveBatchStrategy(
+  storage: Pick<Storage, 'setItem'> | null | undefined,
+  strategy: BatchProcessingStrategy,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(BATCH_STRATEGY_STORAGE_KEY, normalizeBatchStrategy(strategy));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function shouldRunParallelLookup(strategy: BatchProcessingStrategy): boolean {
+  return normalizeBatchStrategy(strategy) === 'concurrent';
+}
+
+export function describeBatchStrategy(strategy: BatchProcessingStrategy): string {
+  return normalizeBatchStrategy(strategy) === 'sequential'
+    ? 'Slower, one request at a time (better for rate-limited API keys)'
+    : 'Fast, parallel multi-provider requests (higher API load)';
+}
 
 export const BULK_SAMPLE_BATCH = [
   '1[.]2[.]3[.]4',

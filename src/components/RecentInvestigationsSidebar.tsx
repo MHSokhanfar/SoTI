@@ -296,8 +296,8 @@ export function RecentInvestigationsSidebar({
             <button
               type="button"
               data-testid="export-recent-history-btn"
-              aria-label="Export recent investigation history as JSON"
-              title="Download investigation IDs and timestamps as JSON"
+              aria-label="Export All recent investigation history as JSON"
+              title="Download full investigation history and metadata for all investigation IDs as JSON"
               onClick={handleExportHistory}
               className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
             >
@@ -309,7 +309,7 @@ export function RecentInvestigationsSidebar({
               ) : (
                 <>
                   <Download className="h-3 w-3" aria-hidden="true" />
-                  <span>Export</span>
+                  <span>Export All</span>
                 </>
               )}
             </button>

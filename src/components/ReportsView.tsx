@@ -66,6 +66,7 @@ import type { RecentInvestigationEntry } from '../utils/investigationHistory';
 import type { ThemeMode } from '../utils/theme';
 import { IocRegionHeatmap } from './IocRegionHeatmap';
 import { LiveActivityFeed } from './LiveActivityFeed';
+import { RecentHistoryDashboardPanel } from './RecentHistoryDashboardPanel';
 import { RelationshipGraphWidget } from './RelationshipGraphWidget';
 import { RiskScoreHeatmap } from './RiskScoreHeatmap';
 import { ThreatLandscapeWidget } from './ThreatLandscapeWidget';
@@ -100,6 +101,8 @@ interface ReportsViewProps {
   sharedReportSnapshot?: SharedReportSnapshot | null;
   sharedReportError?: string | null;
   onDismissSharedReport?: () => void;
+  onOpenInvestigation?: (entry: RecentInvestigationEntry) => void;
+  onNavigateToInvestigate?: () => void;
 }
 
 function renderInlineSummaryTokens(text: string): ReactNode[] {
@@ -195,6 +198,8 @@ export function ReportsView({
   sharedReportSnapshot = null,
   sharedReportError = null,
   onDismissSharedReport,
+  onOpenInvestigation,
+  onNavigateToInvestigate,
 }: ReportsViewProps) {
   const privacyMode = usePrivacyMode();
   const isDark = theme === 'dark';
@@ -1122,6 +1127,19 @@ export function ReportsView({
               }}
             />
           )}
+
+          <RecentHistoryDashboardPanel
+            entries={recentInvestigations}
+            onOpenInvestigation={onOpenInvestigation}
+            onNavigateToInvestigate={onNavigateToInvestigate}
+            onExportSuccess={({ filename, count }) =>
+              pushToast({
+                variant: 'success',
+                title: 'Investigation history exported',
+                detail: `${filename} (${count} investigation ID${count === 1 ? '' : 's'})`,
+              })
+            }
+          />
         </div>
       ) : (
         <>
@@ -1620,6 +1638,19 @@ export function ReportsView({
               setVerdictFilter('All');
               setSearchQuery(indicator);
             }}
+          />
+
+          <RecentHistoryDashboardPanel
+            entries={recentInvestigations}
+            onOpenInvestigation={onOpenInvestigation}
+            onNavigateToInvestigate={onNavigateToInvestigate}
+            onExportSuccess={({ filename, count }) =>
+              pushToast({
+                variant: 'success',
+                title: 'Investigation history exported',
+                detail: `${filename} (${count} investigation ID${count === 1 ? '' : 's'})`,
+              })
+            }
           />
 
           <RelationshipGraphWidget

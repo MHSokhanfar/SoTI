@@ -18,6 +18,7 @@ import {
   FileJson,
   FilePenLine,
   FileText,
+  Gauge,
   HelpCircle,
   Layers,
   Link2,
@@ -113,13 +114,31 @@ import {
   BULK_SAMPLE_BATCH,
   buildUnifiedBatchTable,
   deduplicateBulkInputLines,
+  describeBatchStrategy,
   filterUnifiedBatchRows,
   formatIndicatorsAsNewlines,
   formatUnifiedBatchRowClipboard,
+  shouldRunParallelLookup,
   summarizeBulkInputStats,
+  type BatchProcessingStrategy,
   type InvestigationAnalysisMode,
 } from '../utils/bulkAnalysis';
-import { formatBulkIndicatorsText } from '../utils/bulkCsv';
+import {
+  extractIndicatorsFromFile,
+  formatBulkIndicatorsText,
+  isSupportedIndicatorFile,
+} from '../utils/bulkCsv';
+import {
+  chunkLookupIndicators,
+  createThrottleConfig,
+  describeThrottleConfig,
+  GLOBAL_THROTTLE_PRESETS,
+  GlobalApiRequestThrottle,
+  loadGlobalThrottleConfig,
+  saveGlobalThrottleConfig,
+  type GlobalApiThrottleTelemetry,
+  type GlobalThrottleConfig,
+} from '../utils/requestThrottle';
 import {
   computeLivePollDelta,
   extractActiveIndicatorsForPolling,
@@ -218,6 +237,7 @@ export interface InvestigationState {
   activeHistoryId: string | null;
   researcherNotes: string;
   analysisMode: InvestigationAnalysisMode;
+  batchStrategy: BatchProcessingStrategy;
   livePollingEnabled: boolean;
   livePollIntervalSec: number;
 }
@@ -480,6 +500,15 @@ export function InvestigateView({
   const [dismissedQuotaSignature, setDismissedQuotaSignature] = useState<string | null>(null);
   const [lastEmailAlert, setLastEmailAlert] = useState<EmailAlertRecord | null>(null);
   const [fileImportSummary, setFileImportSummary] = useState<IndicatorFileSummary | null>(null);
+  const [bulkTextareaDragOver, setBulkTextareaDragOver] = useState(false);
+  const [throttleConfig, setThrottleConfig] = useState<GlobalThrottleConfig>(() =>
+    typeof window !== 'undefined'
+      ? loadGlobalThrottleConfig(window.localStorage)
+      : createThrottleConfig(200),
+  );
+  const [lastThrottleTelemetry, setLastThrottleTelemetry] =
+    useState<GlobalApiThrottleTelemetry | null>(null);
+  const clientPipelineThrottleRef = useRef(new GlobalApiRequestThrottle({ defaultIntervalMs: 200 }));
   const [recentHistory, setRecentHistory] = useState<RecentInvestigationEntry[]>(() =>
     typeof window !== 'undefined' ? loadRecentInvestigations(window.localStorage) : [],
   );
@@ -547,6 +576,7 @@ export function InvestigateView({
       includeUrlscan: boolean | null;
       mode: 'sample' | 'live';
       analysisMode?: InvestigationAnalysisMode;
+      batchStrategy?: BatchProcessingStrategy;
       preserveNotes?: string;
       backgroundPoll?: boolean;
     }) => Promise<void>
@@ -843,6 +873,13 @@ export function InvestigateView({
     });
   }
 
+  function handleUpdateThrottleConfig(next: GlobalThrottleConfig) {
+    setThrottleConfig(next);
+    if (typeof window !== 'undefined') {
+      saveGlobalThrottleConfig(window.localStorage, next);
+    }
+  }
+
   function handleFileExtracted(summary: IndicatorFileSummary) {
     setErrorMsg(null);
     const bulkText = formatBulkIndicatorsText(summary.parsed);
@@ -858,6 +895,71 @@ export function InvestigateView({
       window.requestAnimationFrame(() => {
         iocInputRef.current?.focus();
       });
+    }
+  }
+
+  function handleChangeDesignatedColumn(column: string) {
+    if (!fileImportSummary) return;
+    const reParsed = extractIndicatorsFromFile(
+      fileImportSummary.rawContent,
+      fileImportSummary.fileName,
+      fileImportSummary.mimeType,
+      { designatedColumn: column },
+    );
+    const updatedSummary: IndicatorFileSummary = {
+      ...fileImportSummary,
+      designatedColumn: column,
+      parsed: reParsed,
+    };
+    setFileImportSummary(updatedSummary);
+    if (reParsed.validCount === 0) {
+      setErrorMsg(
+        `No valid IP, domain, or hash IOCs found in column "${column}" of "${fileImportSummary.fileName}". Select another column above.`,
+      );
+      return;
+    }
+    setErrorMsg(null);
+    const bulkText = formatBulkIndicatorsText(reParsed);
+    onChangeState((prev) => ({
+      ...prev,
+      analysisMode: 'bulk',
+      rawInput: bulkText || reParsed.rawText,
+      invalidTokens: [],
+    }));
+  }
+
+  async function handleBulkTextareaDrop(e: React.DragEvent<HTMLTextAreaElement>) {
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    e.preventDefault();
+    setBulkTextareaDragOver(false);
+
+    if (!isSupportedIndicatorFile(file.name, file.type)) {
+      handleFileError(
+        `Unsupported file "${file.name}". Drop a .csv or .txt file to extract IOCs into the Bulk field.`,
+      );
+      return;
+    }
+
+    try {
+      const content = await file.text();
+      const parsed = extractIndicatorsFromFile(content, file.name, file.type);
+      if (
+        parsed.validCount === 0 &&
+        !(parsed.availableColumns && parsed.availableColumns.some((c) => c.validCount > 0))
+      ) {
+        handleFileError(`No valid IP, domain, or hash indicators found in "${file.name}".`);
+        return;
+      }
+      handleFileExtracted({
+        fileName: file.name,
+        mimeType: file.type,
+        rawContent: content,
+        designatedColumn: parsed.designatedColumn || '__auto__',
+        parsed,
+      });
+    } catch {
+      handleFileError(`Failed to read file "${file.name}".`);
     }
   }
 
@@ -1296,6 +1398,7 @@ export function InvestigateView({
     includeUrlscan: boolean | null;
     mode: 'sample' | 'live';
     analysisMode?: InvestigationAnalysisMode;
+    batchStrategy?: BatchProcessingStrategy;
     preserveNotes?: string;
     backgroundPoll?: boolean;
   }) {
@@ -1313,6 +1416,8 @@ export function InvestigateView({
     const targetRawInput = override ? override.rawInput : state.rawInput;
     const targetAnalysisMode: InvestigationAnalysisMode =
       override?.analysisMode ?? state.analysisMode;
+    const targetBatchStrategy: BatchProcessingStrategy =
+      override?.batchStrategy ?? state.batchStrategy ?? 'concurrent';
     const targetIsBulk = targetAnalysisMode === 'bulk';
     const targetSource = targetIsBulk ? 'all' : (override ? override.source : state.source);
     const targetCustomSources = override ? override.customSources : state.customSources;
@@ -1380,40 +1485,95 @@ export function InvestigateView({
     } else {
       setLoading(true);
     }
+    const activeThrottleMs = throttleConfig.enabled ? throttleConfig.minIntervalMs : 0;
+
     try {
-      const payload: Record<string, unknown> = {
-        raw: dispatchRaw,
-        source: targetSource,
-        sources: targetEffectiveSources,
-        mode: targetMode,
-        parallel: targetIsBulk || targetPreprocessed.validIndicators.length > 1,
-        backgroundPoll: isBackground,
-      };
-      const resp = await fetch('/api/lookup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        if (isBackground) {
-          setLivePollError(data.error || 'Background refresh failed.');
-        } else {
-          setErrorMsg(data.error || 'Enrichment lookup failed.');
-          if (Array.isArray(data.invalid)) {
-            onChangeState((prev) => ({ ...prev, invalidTokens: data.invalid }));
+      const validTokensList = targetPreprocessed.validIndicators.map((v) => v.original || v.cleaned);
+      const tokenChunks =
+        validTokensList.length > 25 ? chunkLookupIndicators(validTokensList, 25) : [null];
+
+      const mergedResults: LookupResult[] = [];
+      const mergedInvalid = new Set<string>();
+      const quotaSkippedByProvider = new Map<string, QuotaSkippedEntry>();
+      let lastChunkData: Record<string, any> | null = null;
+      let totalRequestsPaced = 0;
+      let totalThrottleWaitMs = 0;
+
+      for (let chunkIdx = 0; chunkIdx < tokenChunks.length; chunkIdx += 1) {
+        const chunkTokens = tokenChunks[chunkIdx];
+        const chunkRaw = chunkTokens ? chunkTokens.join('\n') : dispatchRaw;
+        const payload: Record<string, unknown> = {
+          raw: chunkRaw,
+          source: targetSource,
+          sources: targetEffectiveSources,
+          mode: targetMode,
+          parallel: shouldRunParallelLookup(targetBatchStrategy),
+          throttleMs: activeThrottleMs,
+          backgroundPoll: isBackground || chunkIdx > 0,
+        };
+
+        const { result: chunkResponse, slot } = await clientPipelineThrottleRef.current.run(
+          async () => {
+            const resp = await fetch('/api/lookup', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+            const json = await resp.json();
+            return { ok: resp.ok, json };
+          },
+          activeThrottleMs,
+        );
+
+        if (slot.waitMs > 0) {
+          totalRequestsPaced += 1;
+          totalThrottleWaitMs += slot.waitMs;
+        }
+
+        if (!chunkResponse.ok) {
+          if (isBackground) {
+            setLivePollError(chunkResponse.json?.error || 'Background refresh failed.');
+          } else {
+            setErrorMsg(chunkResponse.json?.error || 'Enrichment lookup failed.');
+            if (Array.isArray(chunkResponse.json?.invalid)) {
+              onChangeState((prev) => ({ ...prev, invalidTokens: chunkResponse.json.invalid }));
+            }
+          }
+          return;
+        }
+
+        const chunkJson = chunkResponse.json;
+        lastChunkData = chunkJson;
+        if (Array.isArray(chunkJson.results)) {
+          mergedResults.push(...chunkJson.results);
+        }
+        if (Array.isArray(chunkJson.invalid)) {
+          for (const inv of chunkJson.invalid) mergedInvalid.add(inv);
+        }
+        if (Array.isArray(chunkJson.quotaSkipped)) {
+          for (const qs of chunkJson.quotaSkipped) {
+            quotaSkippedByProvider.set(qs.providerId, qs);
           }
         }
-        return;
+        if (chunkJson.throttle) {
+          totalRequestsPaced += Number(chunkJson.throttle.requestsPaced || 0);
+          totalThrottleWaitMs += Number(chunkJson.throttle.totalWaitMs || 0);
+        }
       }
 
-      const nextResults: LookupResult[] = data.results || [];
-      const nextInvalid: string[] = data.invalid || [];
-      const nextQuotaSkipped: QuotaSkippedEntry[] = Array.isArray(data.quotaSkipped)
-        ? data.quotaSkipped
-        : [];
+      const data = lastChunkData ?? {};
+      const nextResults: LookupResult[] = mergedResults;
+      const nextInvalid: string[] = Array.from(mergedInvalid);
+      const nextQuotaSkipped: QuotaSkippedEntry[] = Array.from(quotaSkippedByProvider.values());
       const nextReportFile: string | null = data.reportFile || null;
       const resolvedMode: 'sample' | 'live' = data.mode || targetMode;
+
+      setLastThrottleTelemetry({
+        enabled: activeThrottleMs > 0,
+        minIntervalMs: activeThrottleMs,
+        requestsPaced: totalRequestsPaced,
+        totalWaitMs: totalThrottleWaitMs,
+      });
 
       const delta = computeLivePollDelta(prevSnapshotResults, nextResults);
       setLastPollDelta(delta);
@@ -1601,6 +1761,7 @@ export function InvestigateView({
               includeUrlscan: cur.includeUrlscan,
               mode: cur.mode,
               analysisMode: cur.analysisMode,
+              batchStrategy: cur.batchStrategy,
               backgroundPoll: true,
             });
           }
@@ -1820,6 +1981,7 @@ export function InvestigateView({
     }
     const built = buildSessionSnapshotUrl(window.location.href, {
       analysisMode: state.analysisMode,
+      batchStrategy: state.batchStrategy,
       mode: state.mode,
       lastRunMode: state.lastRunMode,
       rawInput: state.rawInput,
@@ -1936,6 +2098,7 @@ export function InvestigateView({
       includeUrlscan: cur.includeUrlscan,
       mode: cur.mode,
       analysisMode: cur.analysisMode,
+      batchStrategy: cur.batchStrategy,
       backgroundPoll: cur.results.length > 0,
     });
   }
@@ -2410,6 +2573,14 @@ export function InvestigateView({
               data-testid={isBulkMode ? 'bulk-ioc-textarea' : 'standard-ioc-textarea'}
               rows={isBulkMode ? 6 : 3}
               readOnly={privacyMode}
+              onDragOver={(e) => {
+                if (e.dataTransfer.types.includes('Files')) {
+                  e.preventDefault();
+                  if (!bulkTextareaDragOver) setBulkTextareaDragOver(true);
+                }
+              }}
+              onDragLeave={() => setBulkTextareaDragOver(false)}
+              onDrop={handleBulkTextareaDrop}
               value={privacyMode ? maskSensitiveText(state.rawInput, true) : state.rawInput}
               onChange={(e) => {
                 if (privacyMode) return;
@@ -2417,10 +2588,14 @@ export function InvestigateView({
               }}
               placeholder={
                 isBulkMode
-                  ? 'Paste a list of indicators separated by newlines (one per line):\n1[.]2[.]3[.]4\n8.8.8.8\nhxxp://evil[.]com/login\n44d88612fea8a8f36de82e1278abb02f'
+                  ? 'Paste a list of indicators separated by newlines OR drop a local .csv file here to extract from a designated column:\n1[.]2[.]3[.]4\n8.8.8.8\nhxxp://evil[.]com/login\n44d88612fea8a8f36de82e1278abb02f'
                   : 'e.g. 1[.]2[.]3[.]4, hxxp://evil[.]com, 44d88612fea8a8f36de82e1278abb02f'
               }
-              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/70 px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
+              className={`w-full rounded-lg border px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-900 focus:outline-none transition-colors ${
+                bulkTextareaDragOver
+                  ? 'border-red-500 bg-red-50/50 dark:bg-red-950/30 ring-2 ring-red-500/20'
+                  : 'border-slate-300 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/70'
+              }`}
             />
             {isBulkMode && (
               <div
@@ -2450,7 +2625,8 @@ export function InvestigateView({
                   )}
                 </div>
                 <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
-                  {effectiveSources.length} enabled provider{effectiveSources.length === 1 ? '' : 's'} × {bulkStats.totalValid} IOC{bulkStats.totalValid === 1 ? '' : 's'} = {effectiveSources.length * bulkStats.totalValid} simultaneous lookups
+                  {effectiveSources.length} enabled provider{effectiveSources.length === 1 ? '' : 's'} × {bulkStats.totalValid} IOC{bulkStats.totalValid === 1 ? '' : 's'} = {effectiveSources.length * bulkStats.totalValid}{' '}
+                  {state.batchStrategy === 'sequential' ? 'sequential lookups' : 'concurrent lookups'}
                 </span>
               </div>
             )}
@@ -2460,6 +2636,7 @@ export function InvestigateView({
             summary={fileImportSummary}
             fileInputRef={csvFileInputRef}
             onIndicatorsExtracted={handleFileExtracted}
+            onChangeDesignatedColumn={handleChangeDesignatedColumn}
             onError={handleFileError}
             onDismissSummary={() => setFileImportSummary(null)}
           />
@@ -2508,7 +2685,9 @@ export function InvestigateView({
                 >
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="font-semibold text-slate-800 dark:text-slate-200">
-                      Simultaneous Execution ({enabledSourceIds.length} enabled providers):
+                      {state.batchStrategy === 'sequential'
+                        ? `Sequential Execution (${enabledSourceIds.length} enabled providers):`
+                        : `Concurrent Execution (${enabledSourceIds.length} enabled providers):`}
                     </span>
                     <span className="font-mono text-slate-600 dark:text-slate-300">
                       {enabledSourceIds.length > 0
@@ -2517,7 +2696,9 @@ export function InvestigateView({
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    All enabled threat intelligence APIs run concurrently per indicator and consolidate into a unified batch table.
+                    {state.batchStrategy === 'sequential'
+                      ? 'Lookups execute one indicator and provider at a time to protect rate-limited API keys.'
+                      : 'All enabled threat intelligence APIs run concurrently per indicator and consolidate into a unified batch table.'}
                   </p>
                 </div>
 
@@ -2724,6 +2905,118 @@ export function InvestigateView({
               )}
             </div>
           )}
+
+          <div
+            data-testid="batch-processing-strategy-control"
+            className="flex flex-col gap-2 border-t border-slate-100 dark:border-slate-800/80 pt-3 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:justify-between"
+          >
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0">
+                <Layers className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                <span>Batch Processing Strategy</span>
+              </span>
+              <div
+                role="group"
+                aria-label="Batch processing strategy"
+                className="inline-flex rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 shrink-0"
+              >
+                {(
+                  [
+                    { id: 'concurrent', label: 'Concurrent' },
+                    { id: 'sequential', label: 'Sequential' },
+                  ] as const
+                ).map((option) => {
+                  const active = (state.batchStrategy ?? 'concurrent') === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      data-testid={`batch-strategy-${option.id}`}
+                      aria-pressed={active}
+                      onClick={() =>
+                        onChangeState((prev) => ({
+                          ...prev,
+                          batchStrategy: option.id,
+                        }))
+                      }
+                      className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        active
+                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs font-semibold'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <span
+              data-testid="batch-strategy-description"
+              className="text-[11px] text-slate-500 dark:text-slate-400"
+            >
+              {describeBatchStrategy(state.batchStrategy ?? 'concurrent')}
+            </span>
+          </div>
+
+          <div
+            data-testid="global-api-throttle-control"
+            className="flex flex-col gap-2 border-t border-slate-100 dark:border-slate-800/80 pt-3 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:justify-between"
+          >
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0">
+                <Gauge className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                <span>Global API Throttle</span>
+              </span>
+              <div
+                role="group"
+                aria-label="Global API request throttle"
+                className="inline-flex flex-wrap gap-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5 max-w-full min-w-0"
+              >
+                {GLOBAL_THROTTLE_PRESETS.map((preset) => {
+                  const active =
+                    (throttleConfig.enabled ? throttleConfig.minIntervalMs : 0) === preset.minIntervalMs;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      data-testid={`global-throttle-${preset.id}`}
+                      aria-pressed={active}
+                      onClick={() => handleUpdateThrottleConfig(createThrottleConfig(preset.minIntervalMs))}
+                      className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        active
+                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs font-semibold'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                      }`}
+                    >
+                      {preset.label}
+                      {preset.minIntervalMs > 0 ? ` (${preset.minIntervalMs}ms)` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+              <span data-testid="global-throttle-description">
+                {describeThrottleConfig(throttleConfig)}
+              </span>
+              {lastThrottleTelemetry && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span
+                    data-testid="last-throttle-telemetry"
+                    className="font-mono text-slate-700 dark:text-slate-300 tabular-nums"
+                  >
+                    {lastThrottleTelemetry.enabled
+                      ? `Last batch paced ${lastThrottleTelemetry.requestsPaced} call${lastThrottleTelemetry.requestsPaced === 1 ? '' : 's'} (+${lastThrottleTelemetry.totalWaitMs}ms)`
+                      : 'Last batch unthrottled'}
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
 
           <div
             data-testid="risk-threshold-settings"

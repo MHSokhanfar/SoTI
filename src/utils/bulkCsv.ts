@@ -2,6 +2,14 @@ import { cleanIndicator, detectIndicatorType, type IndicatorType } from './indic
 
 export type IndicatorFileFormat = 'csv' | 'txt';
 
+export interface CsvColumnCandidate {
+  index: number;
+  name: string;
+  validCount: number;
+  sampleValues: string[];
+  isPriorityHeader: boolean;
+}
+
 export interface BulkCsvImportResult {
   indicators: string[];
   rawText: string;
@@ -9,12 +17,15 @@ export interface BulkCsvImportResult {
   validCount: number;
   skippedCount: number;
   detectedColumns: string[];
+  hasHeaderRow?: boolean;
+  availableColumns?: CsvColumnCandidate[];
+  designatedColumn?: string | null;
   breakdown: Record<IndicatorType, number>;
   sourceFormat?: IndicatorFileFormat;
 }
 
 const PRIORITY_HEADER_RE =
-  /^(?:indicator|indicators|ioc|iocs|observable|observables|ip|ip_address|ipv4|ipv6|domain|host|hostname|hash|sha256|sha1|md5|artifact|value|target)$/i;
+  /^(?:indicator|indicators|ioc|iocs|observable|observables|ip|ip_address|ipv4|ipv6|src_ip|dst_ip|dest_ip|domain|host|hostname|hash|sha256|sha1|md5|artifact|value|target)$/i;
 
 export function parseCsvMatrix(csvText: string): string[][] {
   const clean = csvText.replace(/^\ufeff/, '');
@@ -70,7 +81,25 @@ export function parseCsvMatrix(csvText: string): string[][] {
   return rows;
 }
 
-export function extractIndicatorsFromCsv(csvText: string): BulkCsvImportResult {
+function extractValidTokensFromCell(rawCell: string): Array<{ cleaned: string; type: IndicatorType }> {
+  const trimmed = rawCell.trim();
+  if (!trimmed) return [];
+  const subTokens = trimmed.split(/[\s;]+/).filter(Boolean);
+  const found: Array<{ cleaned: string; type: IndicatorType }> = [];
+  for (const tok of subTokens) {
+    const cleaned = cleanIndicator(tok);
+    const type = detectIndicatorType(cleaned);
+    if (type) {
+      found.push({ cleaned, type });
+    }
+  }
+  return found;
+}
+
+export function extractIndicatorsFromCsv(
+  csvText: string,
+  options?: { designatedColumn?: string | null },
+): BulkCsvImportResult {
   const matrix = parseCsvMatrix(csvText);
   if (matrix.length === 0) {
     return {
@@ -80,26 +109,88 @@ export function extractIndicatorsFromCsv(csvText: string): BulkCsvImportResult {
       validCount: 0,
       skippedCount: 0,
       detectedColumns: [],
+      hasHeaderRow: false,
+      availableColumns: [],
+      designatedColumn: null,
       breakdown: { ip: 0, domain: 0, hash: 0 },
       sourceFormat: 'csv',
     };
   }
 
+  const maxColCount = matrix.reduce((max, r) => Math.max(max, r.length), 0);
   const firstRow = matrix[0].map((c) => c.trim());
   const priorityColIndices: number[] = [];
-  const detectedColumns: string[] = [];
+  const priorityHeaders: string[] = [];
 
   firstRow.forEach((header, idx) => {
     if (PRIORITY_HEADER_RE.test(header)) {
       priorityColIndices.push(idx);
-      detectedColumns.push(header);
+      priorityHeaders.push(header);
     }
   });
 
   // Check if first row looks like a header (non-IOC header names)
   const firstRowHasIoc = firstRow.some((cell) => detectIndicatorType(cleanIndicator(cell)) !== null);
-  const startRow = priorityColIndices.length > 0 || !firstRowHasIoc ? 1 : 0;
+  const hasHeaderRow = priorityColIndices.length > 0 || !firstRowHasIoc;
+  const startRow = hasHeaderRow ? 1 : 0;
   const dataRows = matrix.slice(startRow);
+
+  const availableColumns: CsvColumnCandidate[] = Array.from({ length: maxColCount }, (_, idx) => {
+    const rawHeader = hasHeaderRow ? (firstRow[idx] || '').trim() : '';
+    const name = rawHeader || `Column ${idx + 1}`;
+    const colSeen = new Set<string>();
+    const sampleValues: string[] = [];
+    for (const row of dataRows) {
+      const cell = row[idx] ?? '';
+      for (const hit of extractValidTokensFromCell(cell)) {
+        const key = `${hit.type}:${hit.cleaned}`;
+        if (!colSeen.has(key)) {
+          colSeen.add(key);
+          if (sampleValues.length < 3) sampleValues.push(hit.cleaned);
+        }
+      }
+    }
+    return {
+      index: idx,
+      name,
+      validCount: colSeen.size,
+      sampleValues,
+      isPriorityHeader: Boolean(rawHeader && PRIORITY_HEADER_RE.test(rawHeader)),
+    };
+  });
+
+  const requestedCol = options?.designatedColumn?.trim() || null;
+  let targetColIndices: number[];
+  let detectedColumns: string[];
+  let resolvedDesignatedColumn: string | null = '__auto__';
+
+  if (requestedCol && requestedCol !== '__auto__' && requestedCol !== '__all__') {
+    const matchedCol =
+      availableColumns.find((c) => c.name === requestedCol) ??
+      availableColumns.find((c) => c.name.toLowerCase() === requestedCol.toLowerCase());
+    if (matchedCol) {
+      targetColIndices = [matchedCol.index];
+      detectedColumns = [matchedCol.name];
+      resolvedDesignatedColumn = matchedCol.name;
+    } else {
+      targetColIndices = [];
+      detectedColumns = [requestedCol];
+      resolvedDesignatedColumn = requestedCol;
+    }
+  } else if (requestedCol === '__all__') {
+    targetColIndices = availableColumns.map((c) => c.index);
+    detectedColumns = availableColumns.map((c) => c.name);
+    resolvedDesignatedColumn = '__all__';
+  } else if (priorityColIndices.length > 0) {
+    targetColIndices = priorityColIndices;
+    detectedColumns = priorityHeaders;
+    resolvedDesignatedColumn =
+      priorityHeaders.length === 1 ? priorityHeaders[0] : '__auto__';
+  } else {
+    targetColIndices = availableColumns.map((c) => c.index);
+    detectedColumns = [];
+    resolvedDesignatedColumn = '__auto__';
+  }
 
   const seen = new Set<string>();
   const indicators: string[] = [];
@@ -107,10 +198,7 @@ export function extractIndicatorsFromCsv(csvText: string): BulkCsvImportResult {
   let skippedCount = 0;
 
   for (const cells of dataRows) {
-    const targetCells =
-      priorityColIndices.length > 0
-        ? priorityColIndices.map((colIdx) => cells[colIdx] ?? '')
-        : cells;
+    const targetCells = targetColIndices.map((colIdx) => cells[colIdx] ?? '');
 
     let rowHadCandidate = false;
     let rowHadValid = false;
@@ -120,18 +208,13 @@ export function extractIndicatorsFromCsv(csvText: string): BulkCsvImportResult {
       if (!trimmed) continue;
       rowHadCandidate = true;
 
-      // Also support cells containing multiple space/semicolon separated IOCs
-      const subTokens = trimmed.split(/[\s;]+/).filter(Boolean);
-      for (const tok of subTokens) {
-        const cleaned = cleanIndicator(tok);
-        const type = detectIndicatorType(cleaned);
-        if (!type) continue;
+      for (const hit of extractValidTokensFromCell(trimmed)) {
         rowHadValid = true;
-        const key = `${type}:${cleaned}`;
+        const key = `${hit.type}:${hit.cleaned}`;
         if (!seen.has(key)) {
           seen.add(key);
-          indicators.push(cleaned);
-          breakdown[type]++;
+          indicators.push(hit.cleaned);
+          breakdown[hit.type]++;
         }
       }
     }
@@ -148,6 +231,9 @@ export function extractIndicatorsFromCsv(csvText: string): BulkCsvImportResult {
     validCount: indicators.length,
     skippedCount,
     detectedColumns,
+    hasHeaderRow,
+    availableColumns,
+    designatedColumn: resolvedDesignatedColumn,
     breakdown,
     sourceFormat: 'csv',
   };
@@ -223,13 +309,14 @@ export function extractIndicatorsFromFile(
   fileContent: string,
   fileName: string,
   mimeType = '',
+  options?: { designatedColumn?: string | null },
 ): BulkCsvImportResult {
   const lowerName = fileName.trim().toLowerCase();
   const lowerMime = mimeType.trim().toLowerCase();
   if (lowerName.endsWith('.txt') || (lowerMime === 'text/plain' && !lowerName.endsWith('.csv'))) {
     return extractIndicatorsFromTxt(fileContent);
   }
-  return extractIndicatorsFromCsv(fileContent);
+  return extractIndicatorsFromCsv(fileContent, options);
 }
 
 export function formatBulkIndicatorsText(

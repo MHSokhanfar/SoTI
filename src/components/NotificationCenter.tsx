@@ -42,6 +42,8 @@ interface NotificationCenterProps {
   emailAlerts?: EmailAlertRecord[];
   emailAlertsRefreshNonce?: number;
   alertRules?: CustomAlertRule[];
+  confidenceThreshold?: number;
+  onChangeConfidenceThreshold?: (next: number) => void;
   desktopRuleAlerts?: DesktopRuleNotification[];
   activeDesktopToastIds?: string[];
   alertRuleHistory?: AlertRuleTriggerHistoryEntry[];
@@ -72,6 +74,8 @@ export function NotificationCenter({
   emailAlerts = [],
   emailAlertsRefreshNonce = 0,
   alertRules = [],
+  confidenceThreshold = 0,
+  onChangeConfidenceThreshold,
   desktopRuleAlerts = [],
   activeDesktopToastIds = [],
   alertRuleHistory = [],
@@ -356,6 +360,8 @@ export function NotificationCenter({
                 <AlertRulesPanel
                   compact
                   rules={alertRules}
+                  confidenceThreshold={confidenceThreshold}
+                  onChangeConfidenceThreshold={onChangeConfidenceThreshold}
                   history={alertRuleHistory}
                   currentResults={currentResults}
                   onSaveRule={(rule) => onSaveAlertRule?.(rule)}

@@ -11,6 +11,7 @@ import {
 test('buildSessionSnapshotUrl and decodeSessionSnapshot round-trip full investigation state and UTF-8 notes', () => {
   const built = buildSessionSnapshotUrl('http://localhost:3000/?share=old#investigate', {
     analysisMode: 'bulk',
+    batchStrategy: 'sequential',
     mode: 'sample',
     lastRunMode: 'sample',
     rawInput: '1[.]2[.]3[.]4\nevil.com',
@@ -76,6 +77,7 @@ test('buildSessionSnapshotUrl and decodeSessionSnapshot round-trip full investig
   const decoded = decodeSessionSnapshot(extractedToken!);
   assert.ok(decoded);
   assert.equal(decoded.analysisMode, 'bulk');
+  assert.equal(decoded.batchStrategy, 'sequential');
   assert.equal(decoded.lastRunMode, 'sample');
   assert.equal(decoded.rawInput, '1[.]2[.]3[.]4\nevil.com');
   assert.equal(decoded.researcherNotes, 'Confirmed C2 beacon — pivot to ASN 49505 🚨');

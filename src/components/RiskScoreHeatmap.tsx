@@ -15,9 +15,11 @@ import type { LookupResult } from '../utils/indicators';
 import type { ReportMeta } from '../utils/reportsAnalytics';
 import {
   buildRiskScoreHeatmap,
+  getRiskHeatmapLegendDescriptor,
   type PostureRating,
   type RiskBandId,
   type RiskHeatmapCell,
+  type RiskHeatmapLegendId,
   type RiskHeatmapViewMode,
 } from '../utils/riskScoreHeatmap';
 import type { ThemeMode } from '../utils/theme';
@@ -123,10 +125,18 @@ export function RiskScoreHeatmap({
   const [mode, setMode] = useState<RiskHeatmapViewMode>('investigations');
   const [hoveredCell, setHoveredCell] = useState<RiskHeatmapCell | null>(null);
   const [selectedCell, setSelectedCell] = useState<RiskHeatmapCell | null>(null);
+  const [hoveredLegendId, setHoveredLegendId] = useState<RiskHeatmapLegendId | null>(null);
+  const [pinnedLegendId, setPinnedLegendId] = useState<RiskHeatmapLegendId | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(720);
+
+  const activeLegendId = hoveredLegendId ?? pinnedLegendId;
+  const activeLegendDescriptor = useMemo(
+    () => getRiskHeatmapLegendDescriptor(activeLegendId),
+    [activeLegendId],
+  );
 
   const heatmap = useMemo(
     () =>
@@ -279,10 +289,20 @@ export function RiskScoreHeatmap({
       .data(heatmap.bands)
       .join('g')
       .attr('class', 'y-band-label')
+      .style('cursor', 'pointer')
       .attr(
         'transform',
         (band) => `translate(-12, ${(yScale(band) ?? 0) + yScale.bandwidth() / 2})`,
       )
+      .on('mouseenter', (_event, band) => {
+        setHoveredLegendId(band);
+      })
+      .on('mouseleave', (_event, band) => {
+        setHoveredLegendId((prev) => (prev === band ? null : prev));
+      })
+      .on('click', (_event, band) => {
+        setPinnedLegendId((prev) => (prev === band ? null : band));
+      })
       .each(function (band) {
         const g = d3.select(this);
         const meta = BAND_META[band];
@@ -423,6 +443,32 @@ export function RiskScoreHeatmap({
       })
       .text((c) => `${c.percentageOfColumn}%`);
   }, [heatmap, containerWidth, hasColumns, isDark, mode, selectedCell, selectedRunName, onSelectReport]);
+
+  // Lightweight opacity emphasis when hovering or locking an interactive legend band
+  useEffect(() => {
+    const svgEl = svgRef.current;
+    if (!svgEl || !hasColumns) return;
+
+    const svg = d3.select(svgEl);
+    svg
+      .selectAll<SVGGElement, RiskHeatmapCell>('g.risk-heatmap-cell')
+      .style('transition', 'opacity 150ms ease')
+      .style('opacity', (cell) => {
+        if (!activeLegendId) return 1;
+        if (activeLegendId === 'Zero') {
+          return cell.count === 0 ? 1 : 0.25;
+        }
+        return cell.band === activeLegendId ? 1 : 0.25;
+      });
+
+    svg
+      .selectAll<SVGGElement, RiskBandId>('g.y-band-label')
+      .style('transition', 'opacity 150ms ease')
+      .style('opacity', (band) => {
+        if (!activeLegendId || activeLegendId === 'Zero') return 1;
+        return band === activeLegendId ? 1 : 0.35;
+      });
+  }, [activeLegendId, hasColumns, heatmap]);
 
   const activeCell = selectedCell ?? hoveredCell;
   const posture = getPosturePresentation(heatmap.postureRating);
@@ -570,27 +616,153 @@ export function RiskScoreHeatmap({
             />
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 dark:border-slate-800 pt-3 text-xs text-slate-500 dark:text-slate-400">
-            <div className="flex flex-wrap items-center gap-4">
-              <span className="font-medium text-slate-700 dark:text-slate-300">Risk Bands:</span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-3 w-3 rounded-sm border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900" />
-                <span>0 IOCs</span>
-              </span>
-              {heatmap.bands.map((band) => (
-                <span key={band} className="inline-flex items-center gap-1.5">
-                  <span className={`h-3 w-3 rounded-sm ${BAND_META[band].swatchClass}`} />
-                  <span>
-                    {BAND_META[band].title} ({BAND_META[band].rangeLabel})
-                  </span>
+          <div className="space-y-3 border-t border-slate-100 dark:border-slate-800 pt-3 text-xs text-slate-500 dark:text-slate-400">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div
+                data-testid="risk-heatmap-interactive-legend"
+                role="group"
+                aria-label="Interactive risk score bands legend"
+                className="flex flex-wrap items-center gap-2"
+              >
+                <span className="font-medium text-slate-700 dark:text-slate-300 mr-1">
+                  Risk Bands:
                 </span>
-              ))}
+                {(['Zero', ...heatmap.bands] as RiskHeatmapLegendId[]).map((legendId) => {
+                  const isZero = legendId === 'Zero';
+                  const isActive = activeLegendId === legendId;
+                  const isPinned = pinnedLegendId === legendId;
+                  const meta = isZero ? null : BAND_META[legendId];
+                  const zeroCellCount = isZero
+                    ? heatmap.cells.filter((c) => c.count === 0).length
+                    : 0;
+                  const label = isZero
+                    ? '0 IOCs'
+                    : `${meta!.title} (${meta!.rangeLabel})`;
+
+                  return (
+                    <button
+                      key={legendId}
+                      type="button"
+                      data-testid={`risk-heatmap-legend-item-${legendId.toLowerCase()}`}
+                      aria-pressed={isPinned}
+                      aria-label={`Inspect ${label} score range and calculation rule`}
+                      onMouseEnter={() => setHoveredLegendId(legendId)}
+                      onMouseLeave={() =>
+                        setHoveredLegendId((prev) => (prev === legendId ? null : prev))
+                      }
+                      onFocus={() => setHoveredLegendId(legendId)}
+                      onBlur={() =>
+                        setHoveredLegendId((prev) => (prev === legendId ? null : prev))
+                      }
+                      onClick={() =>
+                        setPinnedLegendId((prev) => (prev === legendId ? null : legendId))
+                      }
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100 ${
+                        isActive
+                          ? 'border-slate-900 dark:border-slate-200 bg-slate-100 dark:bg-slate-800 text-slate-950 dark:text-slate-50'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/70'
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`h-3 w-3 rounded-sm shrink-0 ${
+                          isZero
+                            ? 'border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900'
+                            : meta!.swatchClass
+                        }`}
+                      />
+                      <span>{label}</span>
+                      {!isZero && (
+                        <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                          {heatmap.bandSummary[legendId].count}
+                        </span>
+                      )}
+                      {isZero && (
+                        <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                          {zeroCellCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <span className="font-mono text-[11px] tabular-nums">
+                {mode === 'investigations'
+                  ? `Showing ${heatmap.columns.length} of ${heatmap.totalInvestigationsProcessed} processed investigation${heatmap.totalInvestigationsProcessed === 1 ? '' : 's'} (peak ${heatmap.maxCellCount})`
+                  : `Aggregated across ${heatmap.totalInvestigationsProcessed} investigation${heatmap.totalInvestigationsProcessed === 1 ? '' : 's'} (peak ${heatmap.maxCellCount})`}
+              </span>
             </div>
-            <span className="font-mono text-[11px] tabular-nums">
-              {mode === 'investigations'
-                ? `Showing ${heatmap.columns.length} of ${heatmap.totalInvestigationsProcessed} processed investigation${heatmap.totalInvestigationsProcessed === 1 ? '' : 's'} (peak ${heatmap.maxCellCount})`
-                : `Aggregated across ${heatmap.totalInvestigationsProcessed} investigation${heatmap.totalInvestigationsProcessed === 1 ? '' : 's'} (peak ${heatmap.maxCellCount})`}
-            </span>
+
+            {activeLegendDescriptor ? (
+              <div
+                data-testid="risk-heatmap-legend-tooltip"
+                role="status"
+                aria-live="polite"
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-950/70 px-4 py-3 text-xs space-y-1.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <span
+                      aria-hidden="true"
+                      className={`h-3 w-3 rounded-sm shrink-0 ${
+                        activeLegendDescriptor.band
+                          ? BAND_META[activeLegendDescriptor.band].swatchClass
+                          : 'border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900'
+                      }`}
+                    />
+                    <span
+                      className={`font-semibold ${
+                        activeLegendDescriptor.band
+                          ? BAND_META[activeLegendDescriptor.band].accentText
+                          : 'text-slate-900 dark:text-slate-100'
+                      }`}
+                    >
+                      {activeLegendDescriptor.title}
+                    </span>
+                    <span className="text-slate-400 dark:text-slate-600" aria-hidden="true">·</span>
+                    <span
+                      data-testid="risk-heatmap-legend-tooltip-range"
+                      className="font-mono font-bold text-slate-950 dark:text-slate-50 tabular-nums"
+                    >
+                      Score Range: {activeLegendDescriptor.scoreRange}
+                    </span>
+                    <span className="text-slate-400 dark:text-slate-600" aria-hidden="true">·</span>
+                    <span className="text-slate-600 dark:text-slate-300">
+                      {activeLegendDescriptor.subTiers}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="font-mono text-[11px] font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+                      {activeLegendDescriptor.band
+                        ? `${heatmap.bandSummary[activeLegendDescriptor.band].count} IOC${heatmap.bandSummary[activeLegendDescriptor.band].count === 1 ? '' : 's'} (${heatmap.bandSummary[activeLegendDescriptor.band].percentage}% of evaluated)`
+                        : `${heatmap.cells.filter((c) => c.count === 0).length} empty cell${heatmap.cells.filter((c) => c.count === 0).length === 1 ? '' : 's'}`}
+                    </span>
+                    {pinnedLegendId && (
+                      <button
+                        type="button"
+                        onClick={() => setPinnedLegendId(null)}
+                        className="text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:underline cursor-pointer"
+                      >
+                        Unpin
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                  {activeLegendDescriptor.classificationRule}
+                </p>
+                <p className="font-mono text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                  Calculation: {activeLegendDescriptor.calculationFormula}
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Hover or focus any risk band above to inspect exact score ranges and weighted risk calculation rules.
+              </p>
+            )}
           </div>
 
           {activeCell && activeCell.count > 0 && (

@@ -6,6 +6,7 @@ import {
   buildRecentHistoryExportPayload,
   buildRecentInvestigationEntry,
   clearRecentInvestigations,
+  filterRecentHistoryEntries,
   formatInvestigationTitle,
   formatRelativeTime,
   getInvestigationDisplayTitle,
@@ -279,7 +280,7 @@ test('pinning keeps entries anchored at the top, survives prepend capacity limit
   assert.equal(unpinned.find((x) => x.id === 'run-a')?.pinned, undefined);
 });
 
-test('recent investigation history JSON export includes IDs, timestamps, and metadata cleanly', () => {
+test('recent investigation history JSON export includes IDs, timestamps, confidence summary, and full metadata cleanly', () => {
   const exportedAt = new Date('2026-11-16T03:20:05.000Z');
   assert.equal(
     buildRecentHistoryExportFilename(exportedAt),
@@ -292,12 +293,17 @@ test('recent investigation history JSON export includes IDs, timestamps, and met
     normalizedInput: '1.2.3.4, evil.com',
     indicators: ['1.2.3.4', 'evil.com'],
     source: 'all',
-    customSources: [],
-    useCustomSources: false,
+    customSources: ['virustotal', 'abuseipdb'],
+    useCustomSources: true,
+    includeThreatFox: true,
+    includeUrlscan: false,
     sourceLabels: ['VirusTotal', 'AbuseIPDB'],
     mode: 'sample',
-    results: [makeResult({ verdict: 'Malicious' })],
-    invalidTokens: [],
+    results: [
+      makeResult({ indicator: '1.2.3.4', source: 'VirusTotal', sourceId: 'virustotal', verdict: 'Malicious', score: '20/90', details: { Malicious: 20, 'Total Engines': 90 } }),
+      makeResult({ indicator: 'evil.com', source: 'VirusTotal', sourceId: 'virustotal', type: 'domain', verdict: 'Clean', score: '0/90', details: { Malicious: 0, 'Total Engines': 90 } }),
+    ],
+    invalidTokens: ['not_an_ioc'],
     quotaSkipped: [],
     reportFile: 'soti_20261116_031900.csv',
     tags: ['C2'],
@@ -308,17 +314,81 @@ test('recent investigation history JSON export includes IDs, timestamps, and met
   });
 
   const payload = buildRecentHistoryExportPayload([e1], exportedAt);
+  assert.equal(payload.schemaVersion, '1.1');
   assert.equal(payload.exportedAt, '2026-11-16T03:20:05.000Z');
   assert.equal(payload.totalEntries, 1);
   assert.equal(payload.investigations[0].id, 'inv_17000001_ab12');
   assert.equal(payload.investigations[0].createdAt, '2026-11-16T03:19:00.000Z');
   assert.equal(payload.investigations[0].timestamp, '2026-11-16T03:19:00.000Z');
   assert.equal(payload.investigations[0].title, 'Priority Triage');
+  assert.equal(payload.investigations[0].customTitle, 'Priority Triage');
+  assert.equal(payload.investigations[0].rawInput, '1.2.3.4, evil.com');
+  assert.equal(payload.investigations[0].source, 'all');
+  assert.deepEqual(payload.investigations[0].customSources, ['virustotal', 'abuseipdb']);
+  assert.equal(payload.investigations[0].useCustomSources, true);
+  assert.equal(payload.investigations[0].includeThreatFox, true);
+  assert.equal(payload.investigations[0].includeUrlscan, false);
   assert.equal(payload.investigations[0].pinned, true);
   assert.deepEqual(payload.investigations[0].tags, ['C2']);
+  assert.deepEqual(payload.investigations[0].invalidTokens, ['not_an_ioc']);
+  assert.equal(payload.investigations[0].resultsCount, 2);
+  assert.equal(payload.investigations[0].confidenceSummary.length, 2);
+  assert.equal(payload.investigations[0].confidenceSummary[0].indicator, '1.2.3.4');
 
   const parsed = JSON.parse(serializeRecentHistoryExportJson([], exportedAt));
+  assert.equal(parsed.schemaVersion, '1.1');
   assert.equal(parsed.totalEntries, 0);
   assert.deepEqual(parsed.investigations, []);
+});
+
+test('filterRecentHistoryEntries matches investigation ID, defanged indicators, tags, and notes cleanly', () => {
+  const e1 = buildRecentInvestigationEntry({
+    id: 'inv_alpha_01',
+    rawInput: '1.2.3.4',
+    normalizedInput: '1.2.3.4',
+    indicators: ['1.2.3.4'],
+    source: 'all',
+    customSources: [],
+    useCustomSources: false,
+    sourceLabels: ['VirusTotal'],
+    mode: 'sample',
+    results: [makeResult({ indicator: '1.2.3.4', verdict: 'Malicious' })],
+    invalidTokens: [],
+    quotaSkipped: [],
+    reportFile: null,
+    tags: ['C2'],
+    now: new Date('2026-11-16T03:00:00.000Z'),
+  });
+  const e2 = buildRecentInvestigationEntry({
+    id: 'inv_beta_02',
+    rawInput: 'clean.example',
+    normalizedInput: 'clean.example',
+    indicators: ['clean.example'],
+    source: 'all',
+    customSources: [],
+    useCustomSources: false,
+    sourceLabels: ['AlienVault OTX'],
+    mode: 'live',
+    results: [makeResult({ indicator: 'clean.example', verdict: 'Clean' })],
+    invalidTokens: [],
+    quotaSkipped: [],
+    reportFile: null,
+    now: new Date('2026-11-16T04:00:00.000Z'),
+  });
+
+  const entries = [e1, e2];
+  assert.equal(filterRecentHistoryEntries(entries, '').length, 2);
+  assert.deepEqual(
+    filterRecentHistoryEntries(entries, 'inv_beta_02').map((x) => x.id),
+    ['inv_beta_02'],
+  );
+  assert.deepEqual(
+    filterRecentHistoryEntries(entries, '1[.]2[.]3[.]4').map((x) => x.id),
+    ['inv_alpha_01'],
+  );
+  assert.deepEqual(
+    filterRecentHistoryEntries(entries, 'c2').map((x) => x.id),
+    ['inv_alpha_01'],
+  );
 });
 

@@ -85,6 +85,7 @@ export interface AlertRuleTriggerHistoryEntry {
 export const ALERT_RULES_STORAGE_KEY = 'soti_custom_alert_rules_v1';
 export const ALERT_RULE_HISTORY_STORAGE_KEY = 'soti_alert_rule_history_v1';
 export const DESKTOP_RULE_ALERTS_STORAGE_KEY = 'soti_desktop_rule_alerts_v1';
+export const ALERT_CONFIDENCE_THRESHOLD_STORAGE_KEY = 'soti_alert_confidence_threshold_v1';
 
 export const DEFAULT_CUSTOM_ALERT_RULES: CustomAlertRule[] = [
   {
@@ -173,10 +174,10 @@ export function validateAndNormalizeAlertRuleDraft(
   }
 
   const parsedScore = Math.round(Number(draft.minRiskScore));
-  if (!Number.isFinite(parsedScore) || parsedScore < 1 || parsedScore > 100) {
+  if (!Number.isFinite(parsedScore) || parsedScore < 0 || parsedScore > 100) {
     return {
       ok: false,
-      error: 'Risk score threshold must be an integer between 1 and 100.',
+      error: 'Confidence threshold must be an integer between 0 and 100.',
     };
   }
 
@@ -243,10 +244,64 @@ export function validateAndNormalizeAlertRuleDraft(
   };
 }
 
+export function clampAlertConfidenceThreshold(value: unknown, fallback = 0): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(num)));
+}
+
+export function loadAlertConfidenceThreshold(
+  storage?: Pick<Storage, 'getItem'> | null,
+): number {
+  if (!storage) return 0;
+  try {
+    const raw = storage.getItem(ALERT_CONFIDENCE_THRESHOLD_STORAGE_KEY);
+    if (raw === null || raw === '') return 0;
+    return clampAlertConfidenceThreshold(raw, 0);
+  } catch {
+    return 0;
+  }
+}
+
+export function saveAlertConfidenceThreshold(
+  storage: Pick<Storage, 'setItem'> | null | undefined,
+  threshold: number,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(
+      ALERT_CONFIDENCE_THRESHOLD_STORAGE_KEY,
+      String(clampAlertConfidenceThreshold(threshold, 0)),
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function countIndicatorsMeetingConfidenceThreshold(
+  results: readonly LookupResult[],
+  threshold: number,
+  confidenceMap?: Map<string, IocConfidenceSummary>,
+): { totalScored: number; passing: number } {
+  const minThreshold = clampAlertConfidenceThreshold(threshold, 0);
+  const resolvedMap = confidenceMap ?? computeAllIocConfidenceScores([...results]);
+  let totalScored = 0;
+  let passing = 0;
+  for (const summary of resolvedMap.values()) {
+    if (summary.confidenceScore === null) continue;
+    totalScored += 1;
+    if (summary.confidenceScore >= minThreshold) {
+      passing += 1;
+    }
+  }
+  return { totalScored, passing };
+}
+
 export function evaluateCustomAlertRules(params: {
   rules: readonly CustomAlertRule[];
   results: readonly LookupResult[];
   confidenceMap?: Map<string, IocConfidenceSummary>;
+  globalConfidenceThreshold?: number;
   mode: 'sample' | 'live';
   nowIso?: string;
 }): {
@@ -254,6 +309,10 @@ export function evaluateCustomAlertRules(params: {
   updatedRules: CustomAlertRule[];
 } {
   const nowIso = params.nowIso ?? new Date().toISOString();
+  const minIncomingConfidence = clampAlertConfidenceThreshold(
+    params.globalConfidenceThreshold ?? 0,
+    0,
+  );
   const confidenceMap =
     params.confidenceMap ?? computeAllIocConfidenceScores([...params.results]);
 
@@ -280,6 +339,7 @@ export function evaluateCustomAlertRules(params: {
   for (const [key, rows] of rowsByKey.entries()) {
     const summary = confidenceMap.get(key);
     if (!summary || summary.confidenceScore === null) continue;
+    if (summary.confidenceScore < minIncomingConfidence) continue;
     const first = rows[0];
     grouped.set(key, {
       indicator: summary.indicator,
@@ -457,7 +517,10 @@ export function loadCustomAlertRules(
         name: item.name,
         enabled: Boolean(item.enabled),
         indicatorType: item.indicatorType || 'all',
-        minRiskScore: Math.max(1, Math.min(100, Math.round(Number(item.minRiskScore) || 50))),
+        minRiskScore: clampAlertConfidenceThreshold(
+          item.minRiskScore !== undefined ? item.minRiskScore : 50,
+          50,
+        ),
         verdictScope: item.verdictScope || 'any',
         patternFilter: typeof item.patternFilter === 'string' ? item.patternFilter : '',
         channel: item.channel || 'desktop',

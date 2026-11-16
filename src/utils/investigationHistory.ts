@@ -1,4 +1,8 @@
 import type { LookupResult, SourceSelection } from './indicators';
+import {
+  computeAllIocConfidenceScores,
+  type ConfidenceRiskLevel,
+} from './riskScoring';
 
 export const RECENT_INVESTIGATIONS_STORAGE_KEY = 'soti_recent_investigations_v1';
 export const MAX_RECENT_INVESTIGATIONS = 20;
@@ -437,25 +441,58 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
   return new Date(ts).toISOString().slice(5, 16).replace('T', ' ') + ' UTC';
 }
 
+export interface RecentHistoryExportResultSummary {
+  indicator: string;
+  originalToken: string;
+  type: LookupResult['type'];
+  sourceId: string;
+  source: string;
+  status: LookupResult['status'];
+  verdict: LookupResult['verdict'];
+  score: string;
+  summary: string;
+}
+
+export interface RecentHistoryExportConfidenceEntry {
+  indicator: string;
+  confidenceScore: number | null;
+  riskLevel: ConfidenceRiskLevel;
+  activeProviderCount: number;
+}
+
 export interface RecentHistoryExportItem {
   id: string;
   createdAt: string;
   timestamp: string;
   title: string;
+  customTitle: string | null;
+  rawInput: string;
   normalizedInput: string;
   indicators: string[];
   indicatorCount: number;
   mode: 'sample' | 'live';
+  source: SourceSelection;
+  customSources: string[];
+  useCustomSources: boolean;
+  includeThreatFox: boolean | null;
+  includeUrlscan: boolean | null;
   sources: string[];
   verdictSummary: RecentVerdictSummary;
+  confidenceSummary: RecentHistoryExportConfidenceEntry[];
   pinned: boolean;
   pinnedAt: string | null;
   reportFile: string | null;
   tags: string[];
   notes: string | null;
+  notesUpdatedAt: string | null;
+  invalidTokens: string[];
+  quotaSkipped: RecentQuotaSkippedItem[];
+  resultsCount: number;
+  results: RecentHistoryExportResultSummary[];
 }
 
 export interface RecentHistoryExportPayload {
+  schemaVersion: string;
   exportedAt: string;
   totalEntries: number;
   investigations: RecentHistoryExportItem[];
@@ -472,25 +509,75 @@ export function buildRecentHistoryExportPayload(
   entries: readonly RecentInvestigationEntry[],
   now: Date = new Date(),
 ): RecentHistoryExportPayload {
-  const investigations: RecentHistoryExportItem[] = entries.map((entry) => ({
-    id: entry.id,
-    createdAt: entry.createdAt,
-    timestamp: entry.createdAt,
-    title: getInvestigationDisplayTitle(entry),
-    normalizedInput: entry.normalizedInput,
-    indicators: [...entry.indicators],
-    indicatorCount: entry.indicatorCount,
-    mode: entry.mode,
-    sources: [...entry.sourceLabels],
-    verdictSummary: { ...entry.verdictSummary },
-    pinned: Boolean(entry.pinned),
-    pinnedAt: entry.pinnedAt ?? null,
-    reportFile: entry.reportFile ?? null,
-    tags: Array.isArray(entry.tags) ? [...entry.tags] : [],
-    notes: entry.notes ?? null,
-  }));
+  const ordered = sortRecentInvestigations([...entries]);
+  const investigations: RecentHistoryExportItem[] = ordered.map((entry) => {
+    const confidenceMap = computeAllIocConfidenceScores(entry.results || []);
+    const confidenceSummary: RecentHistoryExportConfidenceEntry[] = [];
+    const seenConfidenceKeys = new Set<string>();
+
+    for (const ind of entry.indicators) {
+      const key = ind.trim().toLowerCase();
+      if (!key || seenConfidenceKeys.has(key)) continue;
+      seenConfidenceKeys.add(key);
+      const summary = confidenceMap.get(key) ?? confidenceMap.get(ind);
+      if (summary) {
+        confidenceSummary.push({
+          indicator: summary.indicator,
+          confidenceScore: summary.confidenceScore,
+          riskLevel: summary.riskLevel,
+          activeProviderCount: summary.activeProviderCount,
+        });
+      }
+    }
+
+    return {
+      id: entry.id,
+      createdAt: entry.createdAt,
+      timestamp: entry.createdAt,
+      title: getInvestigationDisplayTitle(entry),
+      customTitle: entry.customTitle ?? null,
+      rawInput: entry.rawInput,
+      normalizedInput: entry.normalizedInput,
+      indicators: [...entry.indicators],
+      indicatorCount: entry.indicatorCount,
+      mode: entry.mode,
+      source: entry.source,
+      customSources: [...entry.customSources],
+      useCustomSources: Boolean(entry.useCustomSources),
+      includeThreatFox: entry.includeThreatFox ?? null,
+      includeUrlscan: entry.includeUrlscan ?? null,
+      sources: [...entry.sourceLabels],
+      verdictSummary: { ...entry.verdictSummary },
+      confidenceSummary,
+      pinned: Boolean(entry.pinned),
+      pinnedAt: entry.pinnedAt ?? null,
+      reportFile: entry.reportFile ?? null,
+      tags: Array.isArray(entry.tags) ? [...entry.tags] : [],
+      notes: entry.notes ?? null,
+      notesUpdatedAt: entry.notesUpdatedAt ?? null,
+      invalidTokens: Array.isArray(entry.invalidTokens) ? [...entry.invalidTokens] : [],
+      quotaSkipped: Array.isArray(entry.quotaSkipped)
+        ? entry.quotaSkipped.map((q) => ({ ...q }))
+        : [],
+      resultsCount: Array.isArray(entry.results) ? entry.results.length : 0,
+      results: Array.isArray(entry.results)
+        ? entry.results.map((r) => ({
+            indicator: r.indicator,
+            originalToken: r.originalToken,
+            type: r.type,
+            sourceId: r.sourceId,
+            source: r.source,
+            status: r.status,
+            verdict: r.verdict,
+            score: r.score,
+            summary: r.summary,
+          }))
+        : [],
+    };
+  });
 
   return {
+    schemaVersion: '1.1',
     exportedAt: now.toISOString(),
     totalEntries: investigations.length,
     investigations,
@@ -502,5 +589,39 @@ export function serializeRecentHistoryExportJson(
   now: Date = new Date(),
 ): string {
   return JSON.stringify(buildRecentHistoryExportPayload(entries, now), null, 2);
+}
+
+export function filterRecentHistoryEntries(
+  entries: readonly RecentInvestigationEntry[],
+  query: string,
+): RecentInvestigationEntry[] {
+  const ordered = sortRecentInvestigations([...entries]);
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) return ordered;
+
+  const refangedQuery = trimmed
+    .replace(/hxxps?:\/\//gi, '')
+    .replace(/\[\.\]/g, '.')
+    .replace(/\(\.\)/g, '.');
+
+  return ordered.filter((entry) => {
+    const title = getInvestigationDisplayTitle(entry).toLowerCase();
+    const haystack = [
+      entry.id,
+      title,
+      entry.normalizedInput,
+      entry.rawInput,
+      entry.mode,
+      entry.reportFile ?? '',
+      entry.notes ?? '',
+      ...(entry.indicators || []),
+      ...(entry.sourceLabels || []),
+      ...(entry.tags || []),
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    return haystack.includes(trimmed) || (refangedQuery !== trimmed && haystack.includes(refangedQuery));
+  });
 }
 

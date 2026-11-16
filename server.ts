@@ -87,6 +87,12 @@ import {
   normalizeShareTtlHours,
   type SharedReportSnapshot,
 } from './src/utils/reportSharing';
+import {
+  clampThrottleIntervalMs,
+  DEFAULT_THROTTLE_INTERVAL_MS,
+  GlobalApiRequestThrottle,
+  type GlobalApiThrottleTelemetry,
+} from './src/utils/requestThrottle';
 
 const PORT = 3000;
 const ROOT_DIR = process.cwd();
@@ -1901,12 +1907,17 @@ async function createApp() {
     }
   });
 
+  const globalApiRequestThrottle = new GlobalApiRequestThrottle({
+    defaultIntervalMs: DEFAULT_THROTTLE_INTERVAL_MS,
+  });
+
   async function executeEnrichmentBatch(opts: {
     raw: string;
     source: SourceSelection;
     sources?: unknown;
     requestedMode?: unknown;
     parallel?: boolean;
+    throttleMs?: unknown;
     backgroundPoll?: boolean;
   }): Promise<
     | { ok: false; errorStatus: number; error: string; invalid: string[] }
@@ -1918,6 +1929,7 @@ async function createApp() {
         results: LookupResult[];
         quotaSkipped: { providerId: string; name: string; used: number; limit: number; reason: string }[];
         quota: { date: string; providers: ReturnType<typeof buildQuotaSnapshots> };
+        throttle: GlobalApiThrottleTelemetry;
         emailAlert: {
           triggered: boolean;
           record: EmailAlertRecord | null;
@@ -1999,10 +2011,23 @@ async function createApp() {
       );
     }
 
+    const effectiveThrottleMs =
+      opts.throttleMs !== undefined
+        ? clampThrottleIntervalMs(opts.throttleMs, DEFAULT_THROTTLE_INTERVAL_MS)
+        : DEFAULT_THROTTLE_INTERVAL_MS;
+    let batchPacedRequests = 0;
+    let batchThrottleWaitMs = 0;
+
     async function dispatchSingleProviderLookup(
       item: { original: string; cleaned: string; type: IndicatorType },
       src: string,
     ): Promise<LookupResult> {
+      const slot = await globalApiRequestThrottle.acquire(effectiveThrottleMs);
+      if (slot.waitMs > 0) {
+        batchPacedRequests += 1;
+        batchThrottleWaitMs += slot.waitMs;
+      }
+
       let lookupRes: LookupResult;
       if (mode === 'sample') {
         lookupRes = await lookupSample(src, item.cleaned, item.original, item.type, settings);
@@ -2102,6 +2127,13 @@ async function createApp() {
       );
     }
 
+    if (batchPacedRequests > 0) {
+      await appendLog(
+        'INFO',
+        `GLOBAL THROTTLE | Paced ${batchPacedRequests}/${results.length} upstream API call(s) at ${effectiveThrottleMs}ms spacing (+${batchThrottleWaitMs}ms rate-limit buffer)`,
+      );
+    }
+
     const emailAlert = await maybeSendThresholdEmailAlert({
       results,
       mode,
@@ -2154,6 +2186,12 @@ async function createApp() {
       quota: {
         date: latestLedger.date,
         providers: buildQuotaSnapshots(latestLedger, getProviderDisplayInfos(settings)),
+      },
+      throttle: {
+        enabled: effectiveThrottleMs > 0,
+        minIntervalMs: effectiveThrottleMs,
+        requestsPaced: batchPacedRequests,
+        totalWaitMs: batchThrottleWaitMs,
       },
       emailAlert,
     };
@@ -2534,6 +2572,7 @@ async function createApp() {
       sources: req.body?.sources,
       requestedMode: req.body?.mode,
       parallel: Boolean(req.body?.parallel),
+      throttleMs: req.body?.throttleMs,
       backgroundPoll: Boolean(req.body?.backgroundPoll),
     });
     if (outcome.ok === false) {
@@ -2552,6 +2591,7 @@ async function createApp() {
       results: outcome.results,
       quotaSkipped: outcome.quotaSkipped,
       quota: outcome.quota,
+      throttle: outcome.throttle,
       emailAlert: outcome.emailAlert,
     });
   });

@@ -5,6 +5,8 @@ import {
   buildRiskScoreHeatmap,
   classifyRiskBand,
   formatShortRunTimestampLabel,
+  getRiskHeatmapLegendDescriptor,
+  RISK_HEATMAP_LEGEND_ITEMS,
 } from './riskScoreHeatmap';
 
 const SAMPLE_REPORTS: ReportMeta[] = [
@@ -103,6 +105,32 @@ test('classifyRiskBand maps score ranges into High (>=50), Medium (25-49), and L
   assert.equal(classifyRiskBand(24), 'Low');
   assert.equal(classifyRiskBand(0), 'Low');
   assert.equal(classifyRiskBand(null), null);
+});
+
+test('RISK_HEATMAP_LEGEND_ITEMS and getRiskHeatmapLegendDescriptor provide accurate score ranges and calculation clarity', () => {
+  assert.equal(RISK_HEATMAP_LEGEND_ITEMS.length, 4);
+
+  const high = getRiskHeatmapLegendDescriptor('High');
+  assert.equal(high?.scoreRange, '50–100');
+  assert.equal(high?.minScore, 50);
+  assert.equal(high?.maxScore, 100);
+  assert.ok(high?.subTiers.includes('75–100'));
+  assert.ok(high?.calculationFormula.includes('VirusTotal'));
+
+  const medium = getRiskHeatmapLegendDescriptor('Medium');
+  assert.equal(medium?.scoreRange, '25–49');
+  assert.equal(medium?.minScore, 25);
+  assert.equal(medium?.maxScore, 49);
+
+  const low = getRiskHeatmapLegendDescriptor('Low');
+  assert.equal(low?.scoreRange, '0–24');
+  assert.equal(low?.minScore, 0);
+  assert.equal(low?.maxScore, 24);
+
+  const zero = getRiskHeatmapLegendDescriptor('Zero');
+  assert.equal(zero?.band, null);
+  assert.equal(zero?.scoreRange, '0 matches');
+  assert.equal(getRiskHeatmapLegendDescriptor(null), null);
 });
 
 test('formatShortRunTimestampLabel extracts compact MM/DD HH:MM label from soti report filename', () => {

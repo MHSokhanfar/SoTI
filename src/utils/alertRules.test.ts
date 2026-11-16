@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import {
   buildAlertRuleHistoryEntries,
   buildDesktopNotificationsFromHits,
+  clampAlertConfidenceThreshold,
+  countIndicatorsMeetingConfidenceThreshold,
   DEFAULT_CUSTOM_ALERT_RULES,
   evaluateCustomAlertRules,
   formatDesktopBrowserNotificationContent,
+  loadAlertConfidenceThreshold,
   loadCustomAlertRules,
+  saveAlertConfidenceThreshold,
   saveCustomAlertRules,
   validateAndNormalizeAlertRuleDraft,
   type CustomAlertRule,
@@ -215,3 +219,65 @@ test('loadCustomAlertRules and saveCustomAlertRules persist across storage', () 
   assert.equal(reloaded.length, 1);
   assert.equal(reloaded[0].id, defaults[0].id);
 });
+
+test('globalConfidenceThreshold filters incoming investigation results before triggering alert rules and persists 0-100 values', () => {
+  const zeroScoreValid = validateAndNormalizeAlertRuleDraft({
+    name: 'Any Scored Indicator',
+    indicatorType: 'all',
+    minRiskScore: 0,
+    channel: 'desktop',
+  });
+  assert.equal(zeroScoreValid.ok, true);
+  if (zeroScoreValid.ok) {
+    assert.equal(zeroScoreValid.rule.minRiskScore, 0);
+  }
+
+  assert.equal(clampAlertConfidenceThreshold(-10), 0);
+  assert.equal(clampAlertConfidenceThreshold(135), 100);
+  assert.equal(clampAlertConfidenceThreshold(62.6), 63);
+
+  const mem = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      mem.set(k, v);
+    },
+  };
+  assert.equal(loadAlertConfidenceThreshold(mockStorage), 0);
+  saveAlertConfidenceThreshold(mockStorage, 72);
+  assert.equal(loadAlertConfidenceThreshold(mockStorage), 72);
+
+  // Sample fixtures: evil.com (domain) ~75 confidence, 1.2.3.4 (ip) ~90 confidence
+  const allDomainRule: CustomAlertRule = {
+    ...DEFAULT_CUSTOM_ALERT_RULES[0],
+    indicatorType: 'all',
+    minRiskScore: 20,
+  };
+
+  const countAt50 = countIndicatorsMeetingConfidenceThreshold(SAMPLE_RESULTS, 50);
+  assert.equal(countAt50.totalScored, 3);
+  assert.equal(countAt50.passing, 2);
+
+  // Threshold 95 suppresses everything even though rule.minRiskScore is 20
+  const suppressedEval = evaluateCustomAlertRules({
+    rules: [allDomainRule],
+    results: SAMPLE_RESULTS,
+    globalConfidenceThreshold: 95,
+    mode: 'sample',
+  });
+  assert.equal(suppressedEval.hits.length, 0);
+
+  // Threshold 85 allows 1.2.3.4 through while suppressing lower-scoring indicators
+  const selectiveEval = evaluateCustomAlertRules({
+    rules: [allDomainRule],
+    results: SAMPLE_RESULTS,
+    globalConfidenceThreshold: 85,
+    mode: 'sample',
+  });
+  assert.equal(selectiveEval.hits.length, 1);
+  assert.deepEqual(
+    selectiveEval.hits[0].matches.map((m) => m.indicator),
+    ['1.2.3.4'],
+  );
+});
+

@@ -49,6 +49,8 @@ interface CliSetupViewProps {
   quota: QuotaState;
   emailAlertsRefreshNonce?: number;
   alertRules?: CustomAlertRule[];
+  alertConfidenceThreshold?: number;
+  onChangeAlertConfidenceThreshold?: (next: number) => void;
   alertRuleHistory?: AlertRuleTriggerHistoryEntry[];
   currentResults?: readonly LookupResult[];
   onApiSettingsChange: (next: ApiSettings) => void;
@@ -145,6 +147,8 @@ export function CliSetupView({
   quota,
   emailAlertsRefreshNonce = 0,
   alertRules = [],
+  alertConfidenceThreshold = 0,
+  onChangeAlertConfidenceThreshold,
   alertRuleHistory = [],
   currentResults = [],
   onApiSettingsChange,
@@ -1343,6 +1347,8 @@ export function CliSetupView({
 
         <AlertRulesPanel
           rules={alertRules}
+          confidenceThreshold={alertConfidenceThreshold}
+          onChangeConfidenceThreshold={onChangeAlertConfidenceThreshold}
           history={alertRuleHistory}
           currentResults={currentResults}
           onSaveRule={(rule) => onSaveAlertRule?.(rule)}

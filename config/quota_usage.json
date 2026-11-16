@@ -2,28 +2,28 @@
   "date": "2026-11-16",
   "usage": {
     "virustotal": {
-      "used": 182,
+      "used": 214,
       "limit": 500,
       "exhausted": false,
       "exhaustedReason": null,
       "upstreamRemaining": null,
-      "lastUpdatedAt": "2026-11-16T12:38:30Z"
+      "lastUpdatedAt": "2026-11-16T13:44:52Z"
     },
     "abuseipdb": {
-      "used": 104,
+      "used": 123,
       "limit": 1000,
       "exhausted": false,
       "exhaustedReason": null,
-      "upstreamRemaining": 864,
-      "lastUpdatedAt": "2026-11-16T12:38:30Z"
+      "upstreamRemaining": 845,
+      "lastUpdatedAt": "2026-11-16T13:44:51Z"
     },
     "alienvault": {
-      "used": 170,
+      "used": 199,
       "limit": 10000,
       "exhausted": false,
       "exhaustedReason": null,
       "upstreamRemaining": null,
-      "lastUpdatedAt": "2026-11-16T12:38:56Z"
+      "lastUpdatedAt": "2026-11-16T13:44:53Z"
     },
     "shodan": {
       "used": 1,
