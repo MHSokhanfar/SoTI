@@ -25,7 +25,7 @@ Install the following before setting up SoTI locally:
 | :--- | :--- | :--- |
 | **Git** | `2.30+` | Clone the repository |
 | **Python** | `3.10+` with `pip` | Run the Python CLI (`main.py`) and Python unit tests |
-| **Node.js & npm** | `Node.js 18+` (`20 LTS` recommended) | Run the Express backend (`server.ts`), React/Vite Web Workbench, TypeScript unit tests, and production builds |
+| **Node.js & npm** | `Node.js 22+` (`22 LTS` recommended) | Run the Express backend (`server.ts`), React/Vite Web Workbench, TypeScript unit tests, and production builds |
 | **Threat Intel API Keys** | Free or standard tier | Live lookups against VirusTotal, AbuseIPDB, AlienVault OTX, Shodan, ThreatFox, URLScan *(optional for offline Demo / Sample mode)* |
 | **Gemini API Key** *(Optional)* | Standard AI Studio / Gemini key | Server-side AI executive summary generation in the Web Workbench Reports view (`GEMINI_API_KEY`) |
 
@@ -123,7 +123,7 @@ The **Web Workbench** pairs an Express backend (`server.ts` serving API endpoint
 
 ### Starting the Web Workbench
 
-> Make sure **Node.js 18+** is installed and you have run `npm install` in the project root (`SoTI/`).
+> Make sure **Node.js 22+** is installed and you have run `npm install` in the project root (`SoTI/`).
 
 #### 1. Development Mode (Interactive Local Workbench)
 From the project root:
@@ -260,30 +260,37 @@ All screenshots below were captured directly from the running SoTI Web Workbench
 
 ### Investigation Workbench & Input Controls
 ![SoTI Investigation Workbench](docs/screenshots/investigate-workbench.png)
-*Main **Investigate** workspace displaying the **Standard / Bulk Input** mode switcher, **Sample Data / Live API** execution controls, **Live Mode** background polling selector, live daily provider quota bars, automatic defanged IOC recovery (`1[.]2[.]3[.]4`, `hxxp://evil[.]com/login`), provider selector strip, **Risk Threshold** slider, and **Recent Investigations** history sidebar.*
+
+*Main **Investigate** workspace displaying the **Standard / Bulk Input** mode switcher, **Sample Data / Live API** execution controls, **Live Mode** background polling selector, live daily provider quota bars, automatic defanged IOC recovery (`1[.]2[.]3[.]4`, `hxxps://evil[.]com/login`), provider selector strip, **Risk Threshold** slider, and **Recent Investigations** history sidebar.*
 
 ### Results Matrix, Risk Threshold Slider, Sparklines & Quick Copy
 ![SoTI Results Matrix with Risk Threshold and Copy Actions](docs/screenshots/investigate-results-matrix.png)
+
 *Enriched **Summary Matrix** paired with the **Risk Threshold** confidence filter bar (`0–100` slider and `All`, `25+`, `50+`, `75+` presets), color-coded **Confidence Score Legend**, per-row inline **Copy to Clipboard** buttons beside every indicator value, **Trend** confidence sparklines, **`+ Tag`** / **`Watch`** triage controls, and **Export to CSV / Download JSON / Export Full Session** buttons.*
 
 ### Real-Time `Live Activity` Scrollable Feed (`Reports` Dashboard)
 ![SoTI Live Activity Feed](docs/screenshots/dashboard-live-activity.png)
+
 *Real-time **Live Activity** feed mounted beneath the SOC **Quick Stats** KPI cards on the **Reports** dashboard, showing **Live Stream Active** SSE status, alert/run/system-event counters, category filter tabs (`All Activity`, `Threat Alerts`, `Investigations`, `System Events`), inline search, and direct **Filter IOC** / **Open Run** pivots.*
 
 ### Dashboard D3 `Relationship Graph` & Shared Infrastructure Hubs
 ![SoTI D3 Relationship Graph](docs/screenshots/dashboard-relationship-graph.png)
+
 *Force-directed D3 **Relationship Graph** linking IPs, shared domains (`evil.com`), malicious file hashes (`44d88612fea8a8f36de82e1278abb02f` / `eicar.com`), ASNs, and malware families (`LummaStealer`, `CobaltStrike`, `AgentTesla`) with **Shared Infrastructure Hubs** spotlight buttons, **Shared Links Only** filtering, and the **Selected Entity Inspector**.*
 
 ### Real-Time D3 Threat Landscape World Map (`Reports` Tab)
 ![SoTI Real-Time D3 Threat Landscape World Map](docs/screenshots/reports-world-map.png)
+
 *Interactive Natural Earth **Threat Landscape** D3 widget on the **Reports** dashboard with **Real-Time Sync**, severity-colored origin clusters, hover highlighting on continental landmasses (showing live threat counts, peak risk score, and country breakdown), and **Regional Threat Clusters** drill-down cards.*
 
 ### Persistent IOC Watchlist & Status-Change Alerts
 ![SoTI Persistent Watchlist Sidebar](docs/screenshots/watchlist-sidebar.png)
+
 *Tabbed **Watchlist** sidebar showing an active unread **notification badge (`1`)**, tracked indicator verdict and confidence score (`1.2.3.4 · Malicious · 69/100`), status-transition delta banner (`Verdict Clean -> Malicious · Score 0 -> 69 (+69)`), and on-demand **Check Updates / Mark Read** controls.*
 
 ### GUI Threat-Intel API Key Manager & Quota Ledger (`CLI & APIs` Tab)
 ![SoTI CLI & APIs Key Manager](docs/screenshots/cli-api-settings.png)
+
 *Centralized **CLI & APIs** configuration view for saving, testing, masking (`••••238b`), or clearing provider API keys directly in the GUI alongside live daily quota meters and automatic failover rules.*
 
 ---
