@@ -1,29 +1,29 @@
 {
-  "date": "2026-11-15",
+  "date": "2026-11-16",
   "usage": {
     "virustotal": {
-      "used": 97,
+      "used": 42,
       "limit": 500,
       "exhausted": false,
       "exhaustedReason": null,
       "upstreamRemaining": null,
-      "lastUpdatedAt": "2026-11-15T05:35:39Z"
+      "lastUpdatedAt": "2026-11-16T03:53:29Z"
     },
     "abuseipdb": {
-      "used": 49,
+      "used": 25,
       "limit": 1000,
       "exhausted": false,
       "exhaustedReason": null,
-      "upstreamRemaining": 946,
-      "lastUpdatedAt": "2026-11-15T05:35:38Z"
+      "upstreamRemaining": 966,
+      "lastUpdatedAt": "2026-11-16T03:53:28Z"
     },
     "alienvault": {
-      "used": 94,
+      "used": 41,
       "limit": 10000,
       "exhausted": false,
       "exhaustedReason": null,
       "upstreamRemaining": null,
-      "lastUpdatedAt": "2026-11-15T05:35:39Z"
+      "lastUpdatedAt": "2026-11-16T03:53:29Z"
     },
     "shodan": {
       "used": 0,
@@ -34,20 +34,20 @@
       "lastUpdatedAt": null
     },
     "threatfox": {
-      "used": 0,
+      "used": 8,
       "limit": 2000,
       "exhausted": false,
       "exhaustedReason": null,
       "upstreamRemaining": null,
-      "lastUpdatedAt": null
+      "lastUpdatedAt": "2026-11-16T02:53:12Z"
     },
     "urlscan": {
-      "used": 0,
+      "used": 14,
       "limit": 1000,
       "exhausted": false,
       "exhaustedReason": null,
       "upstreamRemaining": null,
-      "lastUpdatedAt": null
+      "lastUpdatedAt": "2026-11-16T02:53:12Z"
     }
   }
 }

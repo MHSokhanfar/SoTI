@@ -270,6 +270,10 @@ export function parseUrlscanApiResponse(params: {
   if (contactedDomains.length > 0) {
     details['Contacted Domain'] = contactedDomains.join(', ');
   }
+  const scanTimeRaw = detail?.task?.time || top?.task?.time;
+  if (scanTimeRaw) {
+    details['Scan Time'] = String(scanTimeRaw);
+  }
   if (scanUuid) {
     details['Scan UUID'] = scanUuid;
   }
@@ -421,8 +425,12 @@ export function buildUrlscanSampleResult(
     Country: isClean ? 'US' : ['NL', 'RU', 'DE'][seed % 3],
     Server: isClean ? 'gws' : 'nginx/1.24.0',
     Categories: isClean ? 'Search Engine' : isSuspicious ? 'Suspicious Redirect' : 'Phishing, Credential Harvesting',
+    'Scan Time': '2026-11-15 09:30 UTC',
   };
 
+  if (itype === 'domain' || refangedUrl) {
+    details['Domain Registered'] = isClean ? '1997-09-15 04:00 UTC' : '2026-11-01 14:15 UTC';
+  }
   if (itype === 'hash') {
     details['Contacted Domain'] = 'evil.com';
   }

@@ -700,3 +700,107 @@ export function aggregateThreatLandscape(
     topCluster: clusters[0] ?? null,
   };
 }
+
+export interface LandmassRegionSummary {
+  featureId: string;
+  regionName: string;
+  threatCount: number;
+  criticalCount: number;
+  highCount: number;
+  countryCount: number;
+  maxScore: number;
+  topCountries: { countryCode: string; countryName: string; count: number }[];
+}
+
+const LANDMASS_REGION_CONFIG: Record<
+  string,
+  { regionName: string; macroRegions: string[] }
+> = {
+  'north-america': { regionName: 'North America', macroRegions: ['North America'] },
+  greenland: { regionName: 'North America', macroRegions: ['North America'] },
+  'south-america': { regionName: 'South America', macroRegions: ['South America'] },
+  'uk-ireland': {
+    regionName: 'Europe',
+    macroRegions: ['Western Europe', 'Northern Europe', 'Eastern Europe'],
+  },
+  europe: {
+    regionName: 'Europe',
+    macroRegions: ['Western Europe', 'Northern Europe', 'Eastern Europe'],
+  },
+  africa: { regionName: 'Africa', macroRegions: ['Africa'] },
+  asia: {
+    regionName: 'Asia & Eurasia',
+    macroRegions: ['Eurasia', 'Middle East', 'South Asia', 'East Asia', 'Southeast Asia'],
+  },
+  japan: {
+    regionName: 'Asia & Eurasia',
+    macroRegions: ['East Asia'],
+  },
+  'indonesia-se': {
+    regionName: 'Asia & Eurasia',
+    macroRegions: ['Southeast Asia'],
+  },
+  australia: { regionName: 'Oceania', macroRegions: ['Oceania'] },
+  'new-zealand': { regionName: 'Oceania', macroRegions: ['Oceania'] },
+};
+
+export function getLandmassRegionSummary(
+  featureId: string,
+  clusters: readonly ThreatClusterPoint[],
+): LandmassRegionSummary {
+  const cfg = LANDMASS_REGION_CONFIG[featureId] ?? {
+    regionName: featureId,
+    macroRegions: [],
+  };
+  const targetSet = new Set(cfg.macroRegions);
+  const matching = clusters.filter((c) => targetSet.has(c.macroRegion));
+
+  let threatCount = 0;
+  let criticalCount = 0;
+  let highCount = 0;
+  let maxScore = 0;
+  for (const c of matching) {
+    threatCount += c.count;
+    criticalCount += c.criticalCount;
+    highCount += c.highCount;
+    if (c.maxScore > maxScore) maxScore = c.maxScore;
+  }
+
+  const topCountries = [...matching]
+    .sort((a, b) => b.count - a.count || b.maxScore - a.maxScore)
+    .slice(0, 4)
+    .map((c) => ({
+      countryCode: c.countryCode,
+      countryName: c.countryName,
+      count: c.count,
+    }));
+
+  return {
+    featureId,
+    regionName: cfg.regionName,
+    threatCount,
+    criticalCount,
+    highCount,
+    countryCount: matching.length,
+    maxScore,
+    topCountries,
+  };
+}
+
+export function mergeRealTimeLookupResults(
+  currentResults: readonly LookupResult[],
+  historicalResults: readonly LookupResult[],
+): LookupResult[] {
+  const merged = new Map<string, LookupResult>();
+  for (const item of historicalResults) {
+    const key = `${item.indicator.trim().toLowerCase()}::${item.sourceId.trim().toLowerCase()}`;
+    merged.set(key, item);
+  }
+  // Prefer freshest active lookup results
+  for (const item of currentResults) {
+    const key = `${item.indicator.trim().toLowerCase()}::${item.sourceId.trim().toLowerCase()}`;
+    merged.set(key, item);
+  }
+  return Array.from(merged.values());
+}
+

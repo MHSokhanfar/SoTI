@@ -3,19 +3,25 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ClipboardCopy,
   ClipboardList,
+  Clock,
   Copy,
   Download,
   ExternalLink,
+  Eye,
   FileJson,
   FilePenLine,
   HelpCircle,
   Layers,
   Mail,
+  Radio,
+  RefreshCw,
   Save,
   Search,
   Settings2,
   ShieldAlert,
+  SlidersHorizontal,
   Sparkles,
   Tag,
   Upload,
@@ -27,6 +33,7 @@ import {
   preprocessInputForLookup,
   refangInputPreservingUrls,
   serializeResultsToCsv,
+  type IndicatorType,
   type LookupResult,
   type SourceSelection,
   type Verdict,
@@ -43,7 +50,9 @@ import {
   type IndicatorFileSummary,
 } from './IndicatorFileUpload';
 import { RecentInvestigationsSidebar } from './RecentInvestigationsSidebar';
+import { WatchlistSidebarTab } from './WatchlistSidebarTab';
 import { IocNetworkGraph } from './IocNetworkGraph';
+import { IocEventTimeline } from './IocEventTimeline';
 import {
   buildRecentInvestigationEntry,
   clearRecentInvestigations,
@@ -58,10 +67,13 @@ import {
   updateRecentInvestigationNotes,
   type RecentInvestigationEntry,
 } from '../utils/investigationHistory';
+import { ConfidenceSparkline } from './ConfidenceSparkline';
 import {
   addTagToIndicator,
   collectTagsForIndicators,
   getTagsForIndicator,
+  getUniqueTagsForIndicators,
+  indicatorMatchesTagFilter,
   loadIndicatorTags,
   removeTagFromIndicator,
   saveIndicatorTags,
@@ -70,7 +82,18 @@ import {
   type IndicatorTagMap,
 } from '../utils/iocTags';
 import {
+  appendConfidenceSnapshot,
+  buildConfidenceTrendsMap,
+  loadConfidenceSnapshots,
+  saveConfidenceSnapshots,
+  type ConfidenceSnapshotMap,
+} from '../utils/confidenceTrend';
+import {
   computeAllIocConfidenceScores,
+  loadRiskThreshold,
+  normalizeRiskThreshold,
+  passesRiskThreshold,
+  saveRiskThreshold,
   type ConfidenceRiskLevel,
 } from '../utils/riskScoring';
 import { formatIocClipboardText, formatIocGroupClipboardText } from '../utils/iocGraph';
@@ -79,17 +102,48 @@ import {
   buildUnifiedBatchTable,
   deduplicateBulkInputLines,
   filterUnifiedBatchRows,
+  formatIndicatorsAsNewlines,
   formatUnifiedBatchRowClipboard,
   summarizeBulkInputStats,
   type InvestigationAnalysisMode,
 } from '../utils/bulkAnalysis';
 import {
+  computeLivePollDelta,
+  extractActiveIndicatorsForPolling,
+  formatLiveCountdown,
+  formatUtcClockTime,
+  LIVE_POLL_INTERVAL_OPTIONS,
+  normalizeLivePollInterval,
+  type LivePollDeltaSummary,
+} from '../utils/livePolling';
+import {
   buildExportedSessionPayload,
   buildSessionExportFilename,
   serializeExportedSessionJson,
 } from '../utils/sessionExport';
+import {
+  buildResultsJsonFilename,
+  buildStructuredResultsJsonPayload,
+  CONFIDENCE_SCORE_LEGEND,
+  serializeStructuredResultsJson,
+} from '../utils/resultsExport';
 import { copyToClipboard } from '../utils/clipboard';
 import { getQuotaWarningProviders } from '../utils/quota';
+import {
+  addIocToWatchlist,
+  countUnreadWatchlistUpdates,
+  evaluateWatchlistUpdates,
+  isWatchlistIndicator,
+  loadSidebarTab,
+  loadWatchlist,
+  markAllWatchlistUpdatesSeen,
+  markWatchlistItemSeen,
+  removeIocFromWatchlist,
+  saveSidebarTab,
+  saveWatchlist,
+  type SidebarTabId,
+  type WatchlistItem,
+} from '../utils/watchlist';
 import type { EmailAlertRecord } from '../utils/emailAlerts';
 import type { ThemeMode } from '../utils/theme';
 import type { QuotaState } from '../App';
@@ -118,6 +172,8 @@ export interface InvestigationState {
   activeHistoryId: string | null;
   researcherNotes: string;
   analysisMode: InvestigationAnalysisMode;
+  livePollingEnabled: boolean;
+  livePollIntervalSec: number;
 }
 
 export interface InvestigateNavigationTarget {
@@ -139,6 +195,9 @@ interface InvestigateViewProps {
   onEmailAlertTriggered?: (record: EmailAlertRecord) => void;
   onOpenEmailAlertRules?: () => void;
   navigationTarget?: InvestigateNavigationTarget | null;
+  focusInputNonce?: number;
+  recentRegionFilter?: string | null;
+  onClearRecentRegionFilter?: () => void;
   onRecentHistoryChange?: (entries: RecentInvestigationEntry[]) => void;
 }
 
@@ -246,9 +305,16 @@ export function InvestigateView({
   onEmailAlertTriggered,
   onOpenEmailAlertRules,
   navigationTarget,
+  focusInputNonce = 0,
+  recentRegionFilter = null,
+  onClearRecentRegionFilter,
   onRecentHistoryChange,
 }: InvestigateViewProps) {
   const [verdictFilter, setVerdictFilter] = useState<'All' | Verdict>('All');
+  const [resultsTagFilter, setResultsTagFilter] = useState<string>('All');
+  const [riskThreshold, setRiskThreshold] = useState<number>(() =>
+    typeof window !== 'undefined' ? loadRiskThreshold(window.localStorage) : 0,
+  );
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [dismissedQuotaSignature, setDismissedQuotaSignature] = useState<string | null>(null);
@@ -262,15 +328,58 @@ export function InvestigateView({
   );
   const [taggingIndicator, setTaggingIndicator] = useState<string | null>(null);
   const [customTagInput, setCustomTagInput] = useState('');
+  const [tableTaggingIndicator, setTableTaggingIndicator] = useState<string | null>(null);
+  const [tableCustomTagInput, setTableCustomTagInput] = useState('');
+  const [historicalReportRows, setHistoricalReportRows] = useState<Record<string, string>[]>([]);
+  const [confidenceSnapshots, setConfidenceSnapshots] = useState<ConfidenceSnapshotMap>(() =>
+    typeof window !== 'undefined' ? loadConfidenceSnapshots(window.localStorage) : {},
+  );
   const [graphFocusedIndicator, setGraphFocusedIndicator] = useState<string | null>(null);
   const [notesSaveStatus, setNotesSaveStatus] = useState<'idle' | 'saved'>('idle');
   const [bulkTableStyle, setBulkTableStyle] = useState<'unified' | 'detailed'>('unified');
   const [sessionExportedFile, setSessionExportedFile] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [isBackgroundPolling, setIsBackgroundPolling] = useState(false);
+  const [nextPollAtMs, setNextPollAtMs] = useState<number | null>(null);
+  const [nowTickMs, setNowTickMs] = useState<number>(() => Date.now());
+  const [lastPollDelta, setLastPollDelta] = useState<LivePollDeltaSummary | null>(null);
+  const [livePollError, setLivePollError] = useState<string | null>(null);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTabId>(() =>
+    typeof window !== 'undefined' ? loadSidebarTab(window.localStorage) : 'recent',
+  );
+  const [watchlistItems, setWatchlistItems] = useState<WatchlistItem[]>(() =>
+    typeof window !== 'undefined' ? loadWatchlist(window.localStorage) : [],
+  );
+  const [checkingWatchlist, setCheckingWatchlist] = useState(false);
+  const [watchlistLastCheckedUtc, setWatchlistLastCheckedUtc] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
   const sessionExportTimerRef = useRef<number | null>(null);
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
+  const iocInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const isBackgroundPollingRef = useRef(false);
+  const latestStateRef = useRef(state);
+  latestStateRef.current = state;
+  const runEnrichmentRef = useRef<
+    (override?: {
+      rawInput: string;
+      source: SourceSelection;
+      customSources: string[];
+      useCustomSources: boolean;
+      includeThreatFox: boolean | null;
+      includeUrlscan: boolean | null;
+      mode: 'sample' | 'live';
+      analysisMode?: InvestigationAnalysisMode;
+      preserveNotes?: string;
+      backgroundPoll?: boolean;
+    }) => Promise<void>
+  >(async () => {});
   const activeHistoryId = state.activeHistoryId;
+
+  useEffect(() => {
+    if (focusInputNonce > 0) {
+      iocInputRef.current?.focus();
+    }
+  }, [focusInputNonce]);
 
   useEffect(() => {
     return () => {
@@ -297,8 +406,59 @@ export function InvestigateView({
   }, [indicatorTags]);
 
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveConfidenceSnapshots(window.localStorage, confidenceSnapshots);
+    }
+  }, [confidenceSnapshots]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveWatchlist(window.localStorage, watchlistItems);
+    }
+  }, [watchlistItems]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveSidebarTab(window.localStorage, sidebarTab);
+    }
+  }, [sidebarTab]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      saveRiskThreshold(window.localStorage, riskThreshold);
+    }
+  }, [riskThreshold]);
+
+  useEffect(() => {
+    if (recentRegionFilter && recentRegionFilter.trim().toLowerCase() !== 'all') {
+      setSidebarTab('recent');
+    }
+  }, [recentRegionFilter]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchHistoricalRows() {
+      try {
+        const res = await fetch('/api/reports/all-rows');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data?.rows)) {
+          setHistoricalReportRows(data.rows);
+        }
+      } catch {
+        // Non-blocking fallback when offline or server unavailable
+      }
+    }
+    void fetchHistoricalRows();
+    return () => {
+      cancelled = true;
+    };
+  }, [state.lastReportFile]);
+
+  useEffect(() => {
     if (!navigationTarget) return;
     setVerdictFilter('All');
+    setResultsTagFilter('All');
     setGraphFocusedIndicator(null);
     if (navigationTarget.historyEntryId) {
       const match = recentHistory.find((item) => item.id === navigationTarget.historyEntryId);
@@ -381,9 +541,22 @@ export function InvestigateView({
     [state.rawInput],
   );
 
+  const livePollIntervalSec = normalizeLivePollInterval(state.livePollIntervalSec);
+  const activePollIndicators = useMemo(
+    () => extractActiveIndicatorsForPolling(state.results, state.rawInput),
+    [state.results, state.rawInput],
+  );
+  const remainingPollSeconds = useMemo(() => {
+    if (!state.livePollingEnabled || !nextPollAtMs) return livePollIntervalSec;
+    return Math.max(0, (nextPollAtMs - nowTickMs) / 1000);
+  }, [state.livePollingEnabled, nextPollAtMs, nowTickMs, livePollIntervalSec]);
+
   const effectiveSources: string[] = useMemo(() => {
     if (isBulkMode) {
-      return enabledSourceIds;
+      const base = [...enabledSourceIds];
+      if (state.includeThreatFox === true && !base.includes('threatfox')) base.push('threatfox');
+      if (state.includeUrlscan === true && !base.includes('urlscan')) base.push('urlscan');
+      return base;
     }
     if (state.useCustomSources) {
       return state.customSources;
@@ -399,7 +572,17 @@ export function InvestigateView({
       base.push('urlscan');
     }
     return base;
-  }, [isBulkMode, state.useCustomSources, state.customSources, state.source, enabledSourceIds, threatfoxChecked, urlscanChecked]);
+  }, [
+    isBulkMode,
+    state.useCustomSources,
+    state.customSources,
+    state.source,
+    state.includeThreatFox,
+    state.includeUrlscan,
+    enabledSourceIds,
+    threatfoxChecked,
+    urlscanChecked,
+  ]);
 
   const visibleQuotaSnapshots = useMemo(() => {
     const ids = new Set([...enabledSourceIds, ...effectiveSources]);
@@ -438,14 +621,97 @@ export function InvestigateView({
     setErrorMsg(message);
   }
 
-  const filteredResults = useMemo(() => {
-    if (verdictFilter === 'All') return state.results;
-    return state.results.filter((r) => r.status === 'ok' && r.verdict === verdictFilter);
-  }, [state.results, verdictFilter]);
+  const resultIndicatorsList = useMemo(
+    () => Array.from(new Set(state.results.map((r) => r.indicator))),
+    [state.results],
+  );
+
+  const availableResultTags = useMemo(
+    () => getUniqueTagsForIndicators(indicatorTags, resultIndicatorsList),
+    [indicatorTags, resultIndicatorsList],
+  );
+
+  useEffect(() => {
+    if (
+      resultsTagFilter !== 'All' &&
+      !availableResultTags.some((t) => t.toLowerCase() === resultsTagFilter.toLowerCase())
+    ) {
+      setResultsTagFilter('All');
+    }
+  }, [availableResultTags, resultsTagFilter]);
 
   const confidenceByIndicator = useMemo(
     () => computeAllIocConfidenceScores(state.results),
     [state.results],
+  );
+
+  const filteredResults = useMemo(() => {
+    return state.results.filter((r) => {
+      if (verdictFilter !== 'All' && !(r.status === 'ok' && r.verdict === verdictFilter)) {
+        return false;
+      }
+      if (resultsTagFilter !== 'All' && !indicatorMatchesTagFilter(indicatorTags, r.indicator, resultsTagFilter)) {
+        return false;
+      }
+      if (riskThreshold > 0) {
+        const conf = confidenceByIndicator.get(r.indicator.trim().toLowerCase());
+        if (!passesRiskThreshold(conf?.confidenceScore, riskThreshold)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [state.results, verdictFilter, resultsTagFilter, indicatorTags, riskThreshold, confidenceByIndicator]);
+
+  const riskHiddenIndicatorCount = useMemo(() => {
+    if (riskThreshold <= 0 || state.results.length === 0) return 0;
+    const seen = new Set<string>();
+    let hidden = 0;
+    for (const r of state.results) {
+      const key = r.indicator.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const conf = confidenceByIndicator.get(key);
+      if (!passesRiskThreshold(conf?.confidenceScore, riskThreshold)) {
+        hidden += 1;
+      }
+    }
+    return hidden;
+  }, [riskThreshold, state.results, confidenceByIndicator]);
+
+  const overallVerdictByIndicator = useMemo(() => {
+    const map = new Map<string, Verdict>();
+    const rank: Record<Verdict, number> = {
+      Malicious: 4,
+      Suspicious: 3,
+      Clean: 2,
+      Unknown: 1,
+    };
+    for (const r of state.results) {
+      if (r.status !== 'ok') continue;
+      const key = r.indicator.trim().toLowerCase();
+      const prev = map.get(key);
+      if (!prev || rank[r.verdict] > rank[prev]) {
+        map.set(key, r.verdict);
+      }
+    }
+    return map;
+  }, [state.results]);
+
+  const unreadWatchlistCount = useMemo(
+    () => countUnreadWatchlistUpdates(watchlistItems),
+    [watchlistItems],
+  );
+
+  const confidenceTrends = useMemo(
+    () =>
+      buildConfidenceTrendsMap({
+        reportRows: historicalReportRows,
+        recentHistory,
+        liveSnapshots: confidenceSnapshots,
+        currentResults: state.results,
+      }),
+    [historicalReportRows, recentHistory, confidenceSnapshots, state.results],
   );
 
   const groupedByIndicator = useMemo(() => {
@@ -466,10 +732,21 @@ export function InvestigateView({
     [state.results, indicatorTags],
   );
 
-  const filteredUnifiedBatchRows = useMemo(
-    () => filterUnifiedBatchRows(unifiedBatchTable.rows, verdictFilter),
-    [unifiedBatchTable.rows, verdictFilter],
-  );
+  const filteredUnifiedBatchRows = useMemo(() => {
+    const byVerdict = filterUnifiedBatchRows(unifiedBatchTable.rows, verdictFilter);
+    return byVerdict.filter((row) => {
+      if (
+        resultsTagFilter !== 'All' &&
+        !indicatorMatchesTagFilter(indicatorTags, row.indicator, resultsTagFilter)
+      ) {
+        return false;
+      }
+      if (riskThreshold > 0 && !passesRiskThreshold(row.confidenceScore, riskThreshold)) {
+        return false;
+      }
+      return true;
+    });
+  }, [unifiedBatchTable.rows, verdictFilter, resultsTagFilter, indicatorTags, riskThreshold]);
 
   function handleAddTag(indicator: string, rawTag: string) {
     setIndicatorTags((prev) => {
@@ -489,6 +766,130 @@ export function InvestigateView({
       }
       return next;
     });
+  }
+
+  function handleToggleWatchIoc(
+    indicator: string,
+    type: IndicatorType,
+    verdict?: Verdict | null,
+    confidenceScore?: number | null,
+  ) {
+    setWatchlistItems((prev) => {
+      if (isWatchlistIndicator(prev, indicator)) {
+        return removeIocFromWatchlist(prev, indicator);
+      }
+      return addIocToWatchlist(prev, {
+        indicator,
+        type,
+        verdict: verdict ?? null,
+        confidenceScore: confidenceScore ?? null,
+      }).next;
+    });
+  }
+
+  function handleAddToWatchlistFromSidebar(rawInput: string): { added: boolean; error?: string } {
+    const normalizedKey = rawInput.trim().toLowerCase();
+    const existing = watchlistItems.find(
+      (item) => item.indicator.trim().toLowerCase() === normalizedKey,
+    );
+    if (existing) {
+      return { added: false, error: 'Indicator is already monitored on your Watchlist.' };
+    }
+    const conf = confidenceByIndicator.get(normalizedKey);
+    const verdict = overallVerdictByIndicator.get(normalizedKey) ?? null;
+    const outcome = addIocToWatchlist(watchlistItems, {
+      indicator: rawInput,
+      verdict,
+      confidenceScore: conf?.confidenceScore ?? null,
+    });
+    if (!outcome.added) {
+      if (outcome.invalid.length > 0) {
+        return { added: false, error: `Unsupported indicator format: ${outcome.invalid[0]}` };
+      }
+      return { added: false, error: 'Indicator is already monitored or invalid.' };
+    }
+    setWatchlistItems(outcome.next);
+    return { added: true };
+  }
+
+  function handleRemoveFromWatchlist(indicator: string) {
+    setWatchlistItems((prev) => removeIocFromWatchlist(prev, indicator));
+  }
+
+  function handleAcknowledgeWatchlistItem(indicator: string) {
+    setWatchlistItems((prev) => markWatchlistItemSeen(prev, indicator));
+  }
+
+  function handleAcknowledgeAllWatchlist() {
+    setWatchlistItems((prev) => markAllWatchlistUpdatesSeen(prev));
+  }
+
+  function handleInspectFromWatchlist(indicator: string) {
+    setWatchlistItems((prev) => markWatchlistItemSeen(prev, indicator));
+    setErrorMsg(null);
+    const matchesCurrent = state.results.some(
+      (r) => r.indicator.trim().toLowerCase() === indicator.trim().toLowerCase(),
+    );
+    if (matchesCurrent) {
+      setGraphFocusedIndicator(indicator);
+      return;
+    }
+    onChangeState((prev) => ({
+      ...prev,
+      rawInput: indicator,
+      analysisMode: 'standard',
+    }));
+    window.requestAnimationFrame(() => {
+      iocInputRef.current?.focus();
+    });
+  }
+
+  async function handleCheckWatchlistUpdates() {
+    if (checkingWatchlist || watchlistItems.length === 0) return;
+    setCheckingWatchlist(true);
+    try {
+      const indicatorsText = watchlistItems.map((item) => item.indicator).join('\n');
+      const targetSources =
+        enabledSourceIds.length > 0
+          ? enabledSourceIds
+          : ['virustotal', 'abuseipdb', 'alienvault'];
+      const resp = await fetch('/api/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          raw: indicatorsText,
+          source: 'all',
+          sources: targetSources,
+          mode: state.mode,
+          parallel: true,
+          backgroundPoll: true,
+        }),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const fetchedResults: LookupResult[] = Array.isArray(data?.results) ? data.results : [];
+      const checkedIso = new Date().toISOString();
+      if (fetchedResults.length > 0) {
+        setWatchlistItems((prev) =>
+          evaluateWatchlistUpdates(prev, fetchedResults, checkedIso).next,
+        );
+        setConfidenceSnapshots((prevSnaps) =>
+          appendConfidenceSnapshot(prevSnaps, fetchedResults, checkedIso, 'live-poll'),
+        );
+      }
+      setWatchlistLastCheckedUtc(formatUtcClockTime(Date.parse(checkedIso)));
+      if (data.quota?.date && Array.isArray(data.quota?.providers)) {
+        onQuotaChange(data.quota);
+      }
+      if (data.emailAlert?.triggered && data.emailAlert?.record) {
+        setLastEmailAlert(data.emailAlert.record);
+        onEmailAlertTriggered?.(data.emailAlert.record);
+      }
+    } catch {
+      // Non-blocking background check error
+    } finally {
+      setCheckingWatchlist(false);
+    }
   }
 
   const activeHistoryEntry = useMemo(
@@ -537,9 +938,18 @@ export function InvestigateView({
     mode: 'sample' | 'live';
     analysisMode?: InvestigationAnalysisMode;
     preserveNotes?: string;
+    backgroundPoll?: boolean;
   }) {
-    setErrorMsg(null);
-    setLastEmailAlert(null);
+    const isBackground = Boolean(override?.backgroundPoll);
+    if (isBackground && (isBackgroundPollingRef.current || loading)) {
+      return;
+    }
+
+    if (!isBackground) {
+      setErrorMsg(null);
+      setLastEmailAlert(null);
+    }
+    setLivePollError(null);
 
     const targetRawInput = override ? override.rawInput : state.rawInput;
     const targetAnalysisMode: InvestigationAnalysisMode =
@@ -562,7 +972,12 @@ export function InvestigateView({
       targetIncludeUrlscan ?? Boolean(apiSettings.extraProviders?.urlscan?.enabled);
 
     const targetEffectiveSources = (() => {
-      if (targetIsBulk) return enabledSourceIds;
+      if (targetIsBulk) {
+        const base = [...enabledSourceIds];
+        if (targetIncludeThreatFox === true && !base.includes('threatfox')) base.push('threatfox');
+        if (targetIncludeUrlscan === true && !base.includes('urlscan')) base.push('urlscan');
+        return base;
+      }
       if (targetUseCustomSources) return targetCustomSources;
       const base =
         targetSource === 'all'
@@ -574,16 +989,20 @@ export function InvestigateView({
     })();
 
     if (!targetRawInput.trim()) {
-      setErrorMsg('Enter at least one IP, domain, URL, or file hash (MD5, SHA1, or SHA256).');
+      if (!isBackground) {
+        setErrorMsg('Enter at least one IP, domain, URL, or file hash (MD5, SHA1, or SHA256).');
+      }
       return;
     }
 
     if (targetEffectiveSources.length === 0) {
-      setErrorMsg(
-        targetIsBulk
-          ? 'No intelligence APIs are enabled. Enable at least one API in CLI & APIs settings.'
-          : 'Select at least one intelligence API to run enrichment.',
-      );
+      if (!isBackground) {
+        setErrorMsg(
+          targetIsBulk
+            ? 'No intelligence APIs are enabled. Enable at least one API in CLI & APIs settings.'
+            : 'Select at least one intelligence API to run enrichment.',
+        );
+      }
       return;
     }
 
@@ -594,14 +1013,22 @@ export function InvestigateView({
       targetPreprocessed.apiReadyInput ||
       targetRawInput.trim();
 
-    setLoading(true);
+    const prevSnapshotResults = latestStateRef.current.results;
+
+    if (isBackground) {
+      isBackgroundPollingRef.current = true;
+      setIsBackgroundPolling(true);
+    } else {
+      setLoading(true);
+    }
     try {
       const payload: Record<string, unknown> = {
         raw: dispatchRaw,
         source: targetSource,
         sources: targetEffectiveSources,
         mode: targetMode,
-        parallel: targetIsBulk,
+        parallel: targetIsBulk || targetPreprocessed.validIndicators.length > 1,
+        backgroundPoll: isBackground,
       };
       const resp = await fetch('/api/lookup', {
         method: 'POST',
@@ -610,9 +1037,13 @@ export function InvestigateView({
       });
       const data = await resp.json();
       if (!resp.ok) {
-        setErrorMsg(data.error || 'Enrichment lookup failed.');
-        if (Array.isArray(data.invalid)) {
-          onChangeState((prev) => ({ ...prev, invalidTokens: data.invalid }));
+        if (isBackground) {
+          setLivePollError(data.error || 'Background refresh failed.');
+        } else {
+          setErrorMsg(data.error || 'Enrichment lookup failed.');
+          if (Array.isArray(data.invalid)) {
+            onChangeState((prev) => ({ ...prev, invalidTokens: data.invalid }));
+          }
         }
         return;
       }
@@ -624,6 +1055,57 @@ export function InvestigateView({
         : [];
       const nextReportFile: string | null = data.reportFile || null;
       const resolvedMode: 'sample' | 'live' = data.mode || targetMode;
+
+      const delta = computeLivePollDelta(prevSnapshotResults, nextResults);
+      setLastPollDelta(delta);
+      setConfidenceSnapshots((prevSnaps) =>
+        appendConfidenceSnapshot(
+          prevSnaps,
+          nextResults,
+          delta.checkedAtIso,
+          isBackground ? 'live-poll' : 'history',
+        ),
+      );
+      setWatchlistItems((prev) =>
+        evaluateWatchlistUpdates(prev, nextResults, delta.checkedAtIso).next,
+      );
+
+      if (isBackground) {
+        onChangeState((prev) => ({
+          ...prev,
+          results: nextResults,
+          invalidTokens: nextInvalid,
+          quotaSkipped: nextQuotaSkipped,
+          lastRunMode: resolvedMode,
+        }));
+        if (latestStateRef.current.activeHistoryId) {
+          const targetId = latestStateRef.current.activeHistoryId;
+          setRecentHistory((prev) =>
+            prev.map((item) =>
+              item.id === targetId
+                ? {
+                    ...item,
+                    timestamp: delta.checkedAtIso,
+                    results: nextResults,
+                    quotaSkipped: nextQuotaSkipped,
+                  }
+                : item,
+            ),
+          );
+        }
+        if (data.quota?.date && Array.isArray(data.quota?.providers)) {
+          onQuotaChange(data.quota);
+        }
+        if (data.emailAlert?.triggered && data.emailAlert?.record) {
+          setLastEmailAlert(data.emailAlert.record);
+          onEmailAlertTriggered?.(data.emailAlert.record);
+        }
+        if (latestStateRef.current.livePollingEnabled) {
+          const nextSec = normalizeLivePollInterval(latestStateRef.current.livePollIntervalSec);
+          setNextPollAtMs(Date.now() + nextSec * 1000);
+        }
+        return;
+      }
 
       const initialRunNotes =
         override?.preserveNotes !== undefined
@@ -673,9 +1155,12 @@ export function InvestigateView({
         onQuotaChange(data.quota);
       }
       setVerdictFilter('All');
+      setResultsTagFilter('All');
       setGraphFocusedIndicator(null);
       setTaggingIndicator(null);
       setCustomTagInput('');
+      setTableTaggingIndicator(null);
+      setTableCustomTagInput('');
       setNotesSaveStatus(entry.notes ? 'saved' : 'idle');
 
       setRecentHistory((prev) => prependRecentInvestigation(prev, entry));
@@ -688,12 +1173,80 @@ export function InvestigateView({
       if (nextReportFile) {
         onReportCreated(nextReportFile);
       }
+
+      if (latestStateRef.current.livePollingEnabled) {
+        const nextSec = normalizeLivePollInterval(latestStateRef.current.livePollIntervalSec);
+        setNextPollAtMs(Date.now() + nextSec * 1000);
+      }
     } catch {
-      setErrorMsg('Unable to reach the enrichment backend.');
+      if (isBackground) {
+        setLivePollError('Unable to reach backend during live refresh.');
+      } else {
+        setErrorMsg('Unable to reach the enrichment backend.');
+      }
     } finally {
-      setLoading(false);
+      if (isBackground) {
+        isBackgroundPollingRef.current = false;
+        setIsBackgroundPolling(false);
+        if (latestStateRef.current.livePollingEnabled) {
+          const nextSec = normalizeLivePollInterval(latestStateRef.current.livePollIntervalSec);
+          setNextPollAtMs(Date.now() + nextSec * 1000);
+        }
+      } else {
+        setLoading(false);
+      }
     }
   }
+
+  runEnrichmentRef.current = runEnrichment;
+
+  useEffect(() => {
+    if (!state.livePollingEnabled) {
+      setNextPollAtMs(null);
+      setLivePollError(null);
+      return;
+    }
+    if (activePollIndicators.length === 0) {
+      setNextPollAtMs(null);
+      return;
+    }
+
+    const intervalMs = livePollIntervalSec * 1000;
+    const now = Date.now();
+    setNowTickMs(now);
+    setNextPollAtMs((prev) => (prev && prev > now ? prev : now + intervalMs));
+
+    const timer = window.setInterval(() => {
+      const currentTick = Date.now();
+      setNowTickMs(currentTick);
+      setNextPollAtMs((prevNext) => {
+        if (!prevNext) return currentTick + intervalMs;
+        if (currentTick >= prevNext && !isBackgroundPollingRef.current) {
+          const cur = latestStateRef.current;
+          const indicators = extractActiveIndicatorsForPolling(cur.results, cur.rawInput);
+          if (indicators.length > 0) {
+            void runEnrichmentRef.current({
+              rawInput: indicators.join('\n'),
+              source: cur.source,
+              customSources: cur.customSources,
+              useCustomSources: cur.useCustomSources,
+              includeThreatFox: cur.includeThreatFox,
+              includeUrlscan: cur.includeUrlscan,
+              mode: cur.mode,
+              analysisMode: cur.analysisMode,
+              backgroundPoll: true,
+            });
+          }
+          return currentTick + intervalMs;
+        }
+        return prevNext;
+      });
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [state.livePollingEnabled, livePollIntervalSec, activePollIndicators.length]);
 
   async function handleRunLookup(e: React.FormEvent) {
     e.preventDefault();
@@ -793,6 +1346,27 @@ export function InvestigateView({
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  function handleExportResultsJson() {
+    if (filteredResults.length === 0) return;
+    const payload = buildStructuredResultsJsonPayload({
+      allResults: state.results,
+      visibleResults: filteredResults,
+      verdictFilter,
+      mode: state.lastRunMode,
+    });
+    const jsonText = serializeStructuredResultsJson(payload);
+    const filename = buildResultsJsonFilename(verdictFilter);
+    const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   function handleExportFullSession() {
     const payload = buildExportedSessionPayload({
       sessionId: activeHistoryId,
@@ -838,14 +1412,19 @@ export function InvestigateView({
     setErrorMsg(null);
     if (nextMode === 'bulk') {
       setBulkTableStyle('unified');
-      onChangeState((prev) => ({
-        ...prev,
-        analysisMode: 'bulk',
-        rawInput:
+      onChangeState((prev) => {
+        const nextRaw =
           prev.rawInput.trim() === SAMPLE_BATCH && prev.results.length === 0
             ? BULK_SAMPLE_BATCH
-            : prev.rawInput,
-      }));
+            : prev.rawInput.includes(',') && !prev.rawInput.includes('\n')
+              ? formatIndicatorsAsNewlines(prev.rawInput) || prev.rawInput
+              : prev.rawInput;
+        return {
+          ...prev,
+          analysisMode: 'bulk',
+          rawInput: nextRaw,
+        };
+      });
     } else {
       onChangeState((prev) => ({
         ...prev,
@@ -856,6 +1435,44 @@ export function InvestigateView({
             : prev.rawInput,
       }));
     }
+  }
+
+  function handleToggleLivePolling() {
+    const nextEnabled = !state.livePollingEnabled;
+    onChangeState((prev) => ({
+      ...prev,
+      livePollingEnabled: nextEnabled,
+    }));
+    if (nextEnabled) {
+      const indicators = extractActiveIndicatorsForPolling(state.results, state.rawInput);
+      const intervalMs = livePollIntervalSec * 1000;
+      const now = Date.now();
+      setNowTickMs(now);
+      setNextPollAtMs(indicators.length > 0 ? now + intervalMs : null);
+      if (state.results.length === 0 && indicators.length > 0 && !loading) {
+        void runEnrichment();
+      }
+    } else {
+      setNextPollAtMs(null);
+      setLivePollError(null);
+    }
+  }
+
+  function handleTriggerManualPollNow() {
+    const cur = latestStateRef.current;
+    const indicators = extractActiveIndicatorsForPolling(cur.results, cur.rawInput);
+    if (indicators.length === 0) return;
+    void runEnrichment({
+      rawInput: indicators.join('\n'),
+      source: cur.source,
+      customSources: cur.customSources,
+      useCustomSources: cur.useCustomSources,
+      includeThreatFox: cur.includeThreatFox,
+      includeUrlscan: cur.includeUrlscan,
+      mode: cur.mode,
+      analysisMode: cur.analysisMode,
+      backgroundPoll: cur.results.length > 0,
+    });
   }
 
   async function triggerClipboardCopy(text: string, key: string) {
@@ -953,7 +1570,7 @@ export function InvestigateView({
                 }`}
               >
                 <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                Bulk Analysis
+                Bulk Input
               </button>
             </div>
 
@@ -981,8 +1598,140 @@ export function InvestigateView({
                 Live API
               </button>
             </div>
+
+            <div className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/60 px-2.5 py-1">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={state.livePollingEnabled}
+                aria-label="Toggle Live Mode periodic background polling"
+                data-testid="live-mode-toggle"
+                onClick={handleToggleLivePolling}
+                className="inline-flex items-center gap-2 text-xs font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                    state.livePollingEnabled
+                      ? 'bg-red-600'
+                      : 'bg-slate-300 dark:bg-slate-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                      state.livePollingEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                    }`}
+                  />
+                </span>
+                <span>Live Mode</span>
+              </button>
+
+              <select
+                aria-label="Live Mode refresh interval"
+                data-testid="live-mode-interval-select"
+                value={livePollIntervalSec}
+                onChange={(e) => {
+                  const nextInterval = normalizeLivePollInterval(e.target.value);
+                  onChangeState((prev) => ({
+                    ...prev,
+                    livePollIntervalSec: nextInterval,
+                  }));
+                  if (state.livePollingEnabled && activePollIndicators.length > 0) {
+                    const now = Date.now();
+                    setNowTickMs(now);
+                    setNextPollAtMs(now + nextInterval * 1000);
+                  }
+                }}
+                className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[11px] font-medium text-slate-700 dark:text-slate-200 focus:border-red-600 focus:outline-none cursor-pointer"
+              >
+                {LIVE_POLL_INTERVAL_OPTIONS.map((opt) => (
+                  <option key={opt.seconds} value={opt.seconds}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
+
+        {state.livePollingEnabled && (
+          <div
+            data-testid="live-mode-status-bar"
+            role="status"
+            aria-live="polite"
+            className="mt-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-slate-100 dark:border-slate-800 pt-3 text-xs"
+          >
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-700 dark:text-slate-300">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-red-700 dark:text-red-400">
+                <Radio className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>Live Polling Active</span>
+              </span>
+              <span className="text-slate-400 dark:text-slate-600" aria-hidden="true">·</span>
+              {activePollIndicators.length > 0 ? (
+                <span className="font-mono tabular-nums">
+                  Monitoring {activePollIndicators.length} active IOC{activePollIndicators.length === 1 ? '' : 's'}
+                </span>
+              ) : (
+                <span className="text-slate-500 dark:text-slate-400">
+                  Armed — run or paste indicators to begin background updates
+                </span>
+              )}
+              {lastPollDelta && (
+                <>
+                  <span className="text-slate-400 dark:text-slate-600" aria-hidden="true">·</span>
+                  <span
+                    data-testid="live-mode-last-refresh"
+                    className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums"
+                  >
+                    Updated {lastPollDelta.checkedAtIso.slice(11, 19)} UTC (
+                    {lastPollDelta.changedCount === 0
+                      ? 'no changes'
+                      : `${lastPollDelta.changedCount} updated${
+                          lastPollDelta.escalatedCount > 0
+                            ? `, ${lastPollDelta.escalatedCount} escalated`
+                            : ''
+                        }`}
+                    )
+                  </span>
+                </>
+              )}
+              {livePollError && (
+                <>
+                  <span className="text-slate-400 dark:text-slate-600" aria-hidden="true">·</span>
+                  <span className="font-medium text-amber-700 dark:text-amber-400">
+                    {livePollError}
+                  </span>
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 max-w-full">
+              <span
+                data-testid="live-mode-next-refresh"
+                className="font-mono text-xs text-slate-700 dark:text-slate-200 tabular-nums"
+              >
+                {isBackgroundPolling
+                  ? 'Refreshing threat data...'
+                  : nextPollAtMs && activePollIndicators.length > 0
+                    ? `Next refresh in ${formatLiveCountdown(remainingPollSeconds)} (${formatUtcClockTime(nextPollAtMs)})`
+                    : `Interval: ${livePollIntervalSec}s`}
+              </span>
+              <button
+                type="button"
+                data-testid="live-mode-refresh-now"
+                disabled={isBackgroundPolling || loading || activePollIndicators.length === 0}
+                onClick={handleTriggerManualPollNow}
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 shrink-0 ${isBackgroundPolling ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+                <span>Refresh Now</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {visibleQuotaSnapshots.length > 0 && (
           <div
@@ -1059,6 +1808,21 @@ export function InvestigateView({
                     Strip defangs
                   </button>
                 )}
+                {isBulkMode && state.rawInput.includes(',') && (
+                  <button
+                    type="button"
+                    data-testid="bulk-split-lines-button"
+                    onClick={() => {
+                      const next = formatIndicatorsAsNewlines(state.rawInput);
+                      if (next) {
+                        onChangeState((prev) => ({ ...prev, rawInput: next }));
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Split to Lines
+                  </button>
+                )}
                 {isBulkMode && (
                   <button
                     type="button"
@@ -1109,6 +1873,7 @@ export function InvestigateView({
               </div>
             </div>
             <textarea
+              ref={iocInputRef}
               id="ioc-input"
               data-testid={isBulkMode ? 'bulk-ioc-textarea' : 'standard-ioc-textarea'}
               rows={isBulkMode ? 6 : 3}
@@ -1116,7 +1881,7 @@ export function InvestigateView({
               onChange={(e) => onChangeState((prev) => ({ ...prev, rawInput: e.target.value }))}
               placeholder={
                 isBulkMode
-                  ? 'Paste a list of indicators (one per line or comma-separated):\n1[.]2[.]3[.]4\n8.8.8.8\nhxxp://evil[.]com/login\n44d88612fea8a8f36de82e1278abb02f'
+                  ? 'Paste a list of indicators separated by newlines (one per line):\n1[.]2[.]3[.]4\n8.8.8.8\nhxxp://evil[.]com/login\n44d88612fea8a8f36de82e1278abb02f'
                   : 'e.g. 1[.]2[.]3[.]4, hxxp://evil[.]com, 44d88612fea8a8f36de82e1278abb02f'
               }
               className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/70 px-3.5 py-2.5 font-mono text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:bg-white dark:focus:bg-slate-900 focus:outline-none"
@@ -1130,6 +1895,8 @@ export function InvestigateView({
                   <span className="font-sans font-medium text-slate-700 dark:text-slate-300">
                     Batch Breakdown:
                   </span>
+                  <span>{bulkStats.lineCount} line{bulkStats.lineCount === 1 ? '' : 's'}</span>
+                  <span>·</span>
                   <span>{bulkStats.totalValid} valid</span>
                   <span>·</span>
                   <span>{bulkStats.ipCount} IP</span>
@@ -1409,6 +2176,91 @@ export function InvestigateView({
               )}
             </div>
           )}
+
+          <div
+            data-testid="risk-threshold-settings"
+            className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 dark:border-slate-800/80 pt-3 text-xs"
+          >
+            <div className="flex flex-wrap items-center gap-3 min-w-0 flex-1">
+              <label
+                htmlFor="investigate-risk-threshold-slider"
+                className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                <span>Risk Threshold</span>
+              </label>
+
+              <div className="flex items-center gap-2.5 min-w-[160px] flex-1 sm:max-w-[260px]">
+                <input
+                  id="investigate-risk-threshold-slider"
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={riskThreshold}
+                  data-testid="risk-threshold-slider"
+                  aria-label="Minimum risk confidence threshold filter"
+                  onChange={(e) => setRiskThreshold(normalizeRiskThreshold(e.target.value))}
+                  className="h-1.5 w-full cursor-pointer accent-red-600 dark:accent-red-500"
+                />
+                <span
+                  data-testid="risk-threshold-value"
+                  className={`font-mono text-xs font-semibold tabular-nums whitespace-nowrap shrink-0 ${
+                    riskThreshold > 0
+                      ? 'text-red-700 dark:text-red-400'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  {riskThreshold === 0 ? 'All (0+)' : `≥ ${riskThreshold}/100`}
+                </span>
+              </div>
+
+              <div className="inline-flex items-center gap-1 rounded-md bg-slate-100 dark:bg-slate-800 p-0.5 shrink-0" role="group" aria-label="Quick risk threshold presets">
+                {[
+                  { label: 'All', val: 0 },
+                  { label: '25+', val: 25 },
+                  { label: '50+', val: 50 },
+                  { label: '75+', val: 75 },
+                ].map((preset) => (
+                  <button
+                    key={preset.val}
+                    type="button"
+                    data-testid={`risk-threshold-preset-${preset.val}`}
+                    onClick={() => setRiskThreshold(preset.val)}
+                    className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors cursor-pointer ${
+                      riskThreshold === preset.val
+                        ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 shrink-0">
+              {riskThreshold > 0 ? (
+                <>
+                  <span data-testid="risk-threshold-hidden-summary" className="font-mono tabular-nums">
+                    {state.results.length > 0
+                      ? `${riskHiddenIndicatorCount} IOC${riskHiddenIndicatorCount === 1 ? '' : 's'} hidden below ${riskThreshold}`
+                      : `Hides IOCs scoring < ${riskThreshold}`}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="risk-threshold-reset-btn"
+                    onClick={() => setRiskThreshold(0)}
+                    className="font-medium text-red-700 dark:text-red-400 hover:underline cursor-pointer"
+                  >
+                    Reset
+                  </button>
+                </>
+              ) : (
+                <span>Slide to hide low-impact IOCs from results tables</span>
+              )}
+            </div>
+          </div>
         </form>
 
         {errorMsg && (
@@ -1521,17 +2373,35 @@ export function InvestigateView({
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full sm:shrink-0">
+                <div
+                  data-testid="download-results-controls"
+                  className="flex flex-wrap items-center gap-2 min-w-0 max-w-full sm:shrink-0"
+                >
+                  <span className="hidden xl:inline text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                    Download Results:
+                  </span>
                   <button
                     type="button"
                     data-testid="export-results-csv-button"
                     disabled={filteredResults.length === 0}
                     onClick={handleExportResultsCsv}
-                    aria-label="Export current investigation results to CSV"
+                    aria-label="Download current analysis results as CSV"
                     className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
                   >
                     <Download className="h-3.5 w-3.5" aria-hidden="true" />
                     Export to CSV
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="export-results-json-button"
+                    disabled={filteredResults.length === 0}
+                    onClick={handleExportResultsJson}
+                    aria-label="Download current analysis results as structured JSON"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    Download JSON
                   </button>
 
                   <button
@@ -1548,59 +2418,253 @@ export function InvestigateView({
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2.5">
-                {isBulkMode ? (
-                  <div
-                    className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-slate-800 p-1 max-w-full"
-                    role="group"
-                    aria-label="Bulk table presentation"
+              <div
+                data-testid="confidence-score-legend"
+                aria-label="Confidence score color legend"
+                className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-slate-100 dark:border-slate-800/80 pt-2.5 text-xs"
+              >
+                <span className="font-semibold text-slate-600 dark:text-slate-400">
+                  Confidence Score Legend:
+                </span>
+                {CONFIDENCE_SCORE_LEGEND.map((tier) => (
+                  <span
+                    key={tier.level}
+                    title={tier.description}
+                    className="inline-flex items-center gap-1.5"
                   >
-                    <button
-                      type="button"
-                      data-testid="bulk-view-unified-btn"
-                      onClick={() => setBulkTableStyle('unified')}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        bulkTableStyle === 'unified'
-                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
-                      }`}
-                    >
-                      Unified Batch
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="bulk-view-detailed-btn"
-                      onClick={() => setBulkTableStyle('detailed')}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        bulkTableStyle === 'detailed'
-                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
-                      }`}
-                    >
-                      Detailed Rows
-                    </button>
-                  </div>
-                ) : (
-                  <div />
-                )}
+                    <span
+                      aria-hidden="true"
+                      className={`h-2 w-2 rounded-full shrink-0 ${tier.swatchClass}`}
+                    />
+                    <span className={`font-semibold ${tier.textClass}`}>{tier.level}</span>
+                    <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                      ({tier.rangeLabel})
+                    </span>
+                  </span>
+                ))}
+              </div>
 
-                <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 min-w-0 max-w-full" role="group" aria-label="Filter by verdict">
-                  {VERDICT_FILTERS.map((v) => (
-                    <button
-                      key={v}
-                      type="button"
-                      onClick={() => setVerdictFilter(v)}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        verdictFilter === v
-                          ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
-                      }`}
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
+                  {isBulkMode && (
+                    <div
+                      className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-slate-800 p-1 max-w-full"
+                      role="group"
+                      aria-label="Bulk table presentation"
                     >
-                      {v}
-                    </button>
-                  ))}
+                      <button
+                        type="button"
+                        data-testid="bulk-view-unified-btn"
+                        onClick={() => setBulkTableStyle('unified')}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          bulkTableStyle === 'unified'
+                            ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                        }`}
+                      >
+                        Unified Batch
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="bulk-view-detailed-btn"
+                        onClick={() => setBulkTableStyle('detailed')}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          bulkTableStyle === 'detailed'
+                            ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                        }`}
+                      >
+                        Detailed Rows
+                      </button>
+                    </div>
+                  )}
+
+                  {availableResultTags.length > 0 && (
+                    <div
+                      data-testid="results-tag-filter-bar"
+                      role="group"
+                      aria-label="Filter results by indicator tag"
+                      className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 min-w-0 max-w-full"
+                    >
+                      <span className="inline-flex items-center gap-1 px-2 text-[11px] font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                        <Tag className="h-3 w-3" aria-hidden="true" />
+                        Tag:
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="results-tag-filter-all"
+                        aria-pressed={resultsTagFilter === 'All'}
+                        onClick={() => setResultsTagFilter('All')}
+                        className={`rounded-md px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          resultsTagFilter === 'All'
+                            ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                        }`}
+                      >
+                        All Tags
+                      </button>
+                      {availableResultTags.map((tag) => {
+                        const active = resultsTagFilter.toLowerCase() === tag.toLowerCase();
+                        return (
+                          <button
+                            key={tag}
+                            type="button"
+                            data-testid={`results-tag-filter-${tag.toLowerCase().replace(/\s+/g, '-')}`}
+                            aria-pressed={active}
+                            onClick={() => setResultsTagFilter(active ? 'All' : tag)}
+                            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              active
+                                ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950 shadow-xs'
+                                : 'text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white'
+                            }`}
+                          >
+                            {tag}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
+                  {riskThreshold > 0 && (
+                    <span
+                      data-testid="risk-threshold-active-pill"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/35 px-2.5 py-1 font-mono text-xs font-medium text-red-700 dark:text-red-300 tabular-nums"
+                    >
+                      <span>Risk ≥ {riskThreshold}/100</span>
+                      {riskHiddenIndicatorCount > 0 && (
+                        <span className="opacity-80">({riskHiddenIndicatorCount} hidden)</span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setRiskThreshold(0)}
+                        aria-label="Clear risk threshold filter"
+                        className="hover:text-red-900 dark:hover:text-red-100 cursor-pointer"
+                      >
+                        <X className="h-3 w-3" aria-hidden="true" />
+                      </button>
+                    </span>
+                  )}
+                  <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 min-w-0 max-w-full" role="group" aria-label="Filter by verdict">
+                    {VERDICT_FILTERS.map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => setVerdictFilter(v)}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          verdictFilter === v
+                            ? 'bg-white dark:bg-slate-700 text-slate-950 dark:text-white shadow-xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100'
+                        }`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
+
+              {tableTaggingIndicator && (
+                <div
+                  data-testid="table-row-tag-composer"
+                  className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/70 p-3 space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <Tag className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">
+                        Manage tags for
+                      </span>
+                      <span className="font-mono font-semibold text-slate-950 dark:text-white break-all">
+                        {tableTaggingIndicator}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="table-row-tag-done"
+                      onClick={() => {
+                        setTableTaggingIndicator(null);
+                        setTableCustomTagInput('');
+                      }}
+                      className="rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mr-1">
+                      Quick labels:
+                    </span>
+                    {SUGGESTED_IOC_TAGS.map((preset) => {
+                      const activeTags = getTagsForIndicator(indicatorTags, tableTaggingIndicator);
+                      const alreadyTagged = activeTags.some(
+                        (t) => t.toLowerCase() === preset.toLowerCase(),
+                      );
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          data-testid={`table-preset-tag-${preset.toLowerCase().replace(/\s+/g, '-')}`}
+                          onClick={() => {
+                            if (alreadyTagged) {
+                              handleRemoveTag(tableTaggingIndicator, preset);
+                            } else {
+                              handleAddTag(tableTaggingIndicator, preset);
+                            }
+                          }}
+                          className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                            alreadyTagged
+                              ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950'
+                              : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          {alreadyTagged ? `✓ ${preset}` : `+ ${preset}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      data-testid="table-custom-tag-input"
+                      value={tableCustomTagInput}
+                      onChange={(e) => setTableCustomTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          if (tableCustomTagInput.trim()) {
+                            handleAddTag(tableTaggingIndicator, tableCustomTagInput);
+                            setTableCustomTagInput('');
+                          }
+                        } else if (e.key === 'Escape') {
+                          setTableTaggingIndicator(null);
+                          setTableCustomTagInput('');
+                        }
+                      }}
+                      placeholder="Enter custom label (e.g. Apt29, False Positive, Triage)"
+                      aria-label={`Custom tag for ${tableTaggingIndicator}`}
+                      className="min-w-[210px] flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      data-testid="table-submit-tag-button"
+                      disabled={!tableCustomTagInput.trim()}
+                      onClick={() => {
+                        if (tableCustomTagInput.trim()) {
+                          handleAddTag(tableTaggingIndicator, tableCustomTagInput);
+                          setTableCustomTagInput('');
+                        }
+                      }}
+                      className="rounded-md bg-slate-900 dark:bg-slate-100 px-3 py-1 text-xs font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Save Tag
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {isBulkMode && bulkTableStyle === 'unified' ? (
@@ -1611,10 +2675,13 @@ export function InvestigateView({
                 >
                   <thead>
                     <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                      <th className="pl-4 pr-2.5 py-3">Indicator</th>
+                      <th className="pl-4 pr-2.5 py-3">Indicator &amp; Tags</th>
                       <th className="px-2.5 py-3">Type</th>
                       <th className="px-2.5 py-3">Overall Verdict</th>
                       <th className="px-2.5 py-3 text-right whitespace-nowrap">Confidence</th>
+                      <th className="px-2.5 py-3 whitespace-nowrap" title="Historical threat confidence trend across runs">
+                        Trend
+                      </th>
                       {unifiedBatchTable.providerColumns.map((col) => (
                         <th key={col.sourceId} className="px-2.5 py-3 whitespace-nowrap">
                           {col.source}
@@ -1627,8 +2694,12 @@ export function InvestigateView({
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {filteredUnifiedBatchRows.map((row) => {
                       const batchRowKey = `batch:${row.indicator}`;
+                      const batchValKey = `batch-val:${row.indicator}`;
                       const isBatchCopied = copiedKey === batchRowKey;
+                      const isBatchValueCopied = copiedKey === batchValKey;
                       const confTone = getConfidenceToneClass(row.riskLevel);
+                      const trend = confidenceTrends.get(row.indicator.trim().toLowerCase());
+                      const isRowTagOpen = tableTaggingIndicator === row.indicator;
                       return (
                         <tr
                           key={batchRowKey}
@@ -1636,19 +2707,91 @@ export function InvestigateView({
                           className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50"
                         >
                           <td className="pl-4 pr-2.5 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
-                            <div className="break-all">{row.indicator}</div>
-                            {row.tags.length > 0 && (
-                              <div className="mt-1 flex flex-wrap gap-1 font-sans">
-                                {row.tags.map((tag) => (
-                                  <span
-                                    key={tag}
-                                    className="whitespace-nowrap rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300"
+                            <div className="flex items-start gap-1.5">
+                              <span className="break-all">{row.indicator}</span>
+                              <button
+                                type="button"
+                                data-testid="copy-indicator-value-btn"
+                                data-copied={isBatchValueCopied ? 'true' : 'false'}
+                                onClick={() => triggerClipboardCopy(row.indicator, batchValKey)}
+                                aria-label={`Copy indicator value ${row.indicator} to clipboard`}
+                                title={isBatchValueCopied ? `Copied ${row.indicator}` : `Copy ${row.indicator} to clipboard`}
+                                className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer ${
+                                  isBatchValueCopied
+                                    ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
+                                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                                }`}
+                              >
+                                {isBatchValueCopied ? (
+                                  <Check className="h-3 w-3" aria-hidden="true" />
+                                ) : (
+                                  <ClipboardCopy className="h-3 w-3" aria-hidden="true" />
+                                )}
+                              </button>
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1 font-sans">
+                              {row.tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  data-testid="table-assigned-tag"
+                                  className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 dark:text-slate-200"
+                                >
+                                  <span>{tag}</span>
+                                  <button
+                                    type="button"
+                                    data-testid="row-remove-tag-btn"
+                                    onClick={() => handleRemoveTag(row.indicator, tag)}
+                                    aria-label={`Remove tag ${tag} from ${row.indicator}`}
+                                    className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
                                   >
-                                    {tag}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
+                                    <X className="h-2.5 w-2.5" aria-hidden="true" />
+                                  </button>
+                                </span>
+                              ))}
+                              <button
+                                type="button"
+                                data-testid="row-add-tag-button"
+                                aria-expanded={isRowTagOpen}
+                                onClick={() => {
+                                  setTableTaggingIndicator(isRowTagOpen ? null : row.indicator);
+                                  setTableCustomTagInput('');
+                                }}
+                                className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                  isRowTagOpen
+                                    ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950'
+                                    : 'border-dashed border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
+                                }`}
+                              >
+                                <Tag className="h-2.5 w-2.5" aria-hidden="true" />
+                                <span>+ Tag</span>
+                              </button>
+                              {(() => {
+                                const isWatched = isWatchlistIndicator(watchlistItems, row.indicator);
+                                return (
+                                  <button
+                                    type="button"
+                                    data-testid="row-watch-toggle-btn"
+                                    aria-pressed={isWatched}
+                                    onClick={() =>
+                                      handleToggleWatchIoc(
+                                        row.indicator,
+                                        row.type,
+                                        row.overallVerdict,
+                                        row.confidenceScore,
+                                      )
+                                    }
+                                    className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                      isWatched
+                                        ? 'border-red-300 dark:border-red-800 bg-red-50/70 dark:bg-red-950/40 text-red-700 dark:text-red-300'
+                                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
+                                    }`}
+                                  >
+                                    <Eye className="h-2.5 w-2.5" aria-hidden="true" />
+                                    <span>{isWatched ? 'Watching' : 'Watch'}</span>
+                                  </button>
+                                );
+                              })()}
+                            </div>
                           </td>
                           <td className="px-2.5 py-3 font-mono text-xs uppercase text-slate-500 dark:text-slate-400 whitespace-nowrap">
                             {row.type}
@@ -1672,6 +2815,9 @@ export function InvestigateView({
                             ) : (
                               <span className="font-mono text-xs text-slate-400 dark:text-slate-500">—</span>
                             )}
+                          </td>
+                          <td className="px-2.5 py-3 whitespace-nowrap">
+                            <ConfidenceSparkline indicator={row.indicator} trend={trend} />
                           </td>
                           {unifiedBatchTable.providerColumns.map((col) => {
                             const cell = row.providerCells[col.sourceId];
@@ -1744,10 +2890,10 @@ export function InvestigateView({
                     {filteredUnifiedBatchRows.length === 0 && (
                       <tr>
                         <td
-                          colSpan={6 + unifiedBatchTable.providerColumns.length}
+                          colSpan={7 + unifiedBatchTable.providerColumns.length}
                           className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400"
                         >
-                          No indicators match the selected verdict filter.
+                          No indicators match the active verdict or tag filters.
                         </td>
                       </tr>
                     )}
@@ -1756,54 +2902,136 @@ export function InvestigateView({
               </div>
             ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+              <table data-testid="summary-matrix-table" className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/60 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                    <th className="pl-4 pr-2.5 py-3">Indicator</th>
-                    <th className="px-2.5 py-3">Type</th>
-                    <th className="px-2.5 py-3">Source</th>
-                    <th className="px-2.5 py-3">Verdict</th>
-                    <th className="px-2.5 py-3 text-right whitespace-nowrap" title="Weighted Confidence Score">
-                      Confidence Score
+                    <th className="pl-3.5 pr-2 py-3">Indicator &amp; Tags</th>
+                    <th className="px-2 py-3">Type</th>
+                    <th className="px-2 py-3">Source</th>
+                    <th className="px-2 py-3">Verdict</th>
+                    <th className="px-2 py-3 text-right whitespace-nowrap" title="Weighted Confidence Score">
+                      Confidence
                     </th>
-                    <th className="px-2.5 py-3 text-right">Score</th>
-                    <th className="px-2.5 py-3">Summary</th>
-                    <th className="pl-2.5 pr-4 py-3 text-right">Actions</th>
+                    <th className="px-2 py-3 whitespace-nowrap" title="Historical threat confidence trend across runs">
+                      Trend
+                    </th>
+                    <th className="px-2 py-3 text-right">Score</th>
+                    <th className="px-2 py-3">Summary</th>
+                    <th className="pl-2 pr-3.5 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {filteredResults.map((r, i) => {
                     const rowKey = `row:${r.indicator}:${r.sourceId}:${i}`;
+                    const valCopyKey = `row-val:${r.indicator}:${r.sourceId}:${i}`;
                     const isCopied = copiedKey === rowKey;
+                    const isValueCopied = copiedKey === valCopyKey;
                     const confidence = confidenceByIndicator.get(r.indicator.trim().toLowerCase());
+                    const trend = confidenceTrends.get(r.indicator.trim().toLowerCase());
                     const rowTags = getTagsForIndicator(indicatorTags, r.indicator);
                     const confTone = getConfidenceToneClass(confidence?.riskLevel ?? 'Unknown');
+                    const isRowTagOpen = tableTaggingIndicator === r.indicator;
                     return (
-                      <tr key={rowKey} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
-                        <td className="pl-4 pr-2.5 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
-                          <div className="break-all">{r.indicator}</div>
-                          {rowTags.length > 0 && (
-                            <div className="mt-1 flex flex-wrap gap-1 font-sans">
-                              {rowTags.map((tag) => (
-                                <span
-                                  key={tag}
-                                  className="whitespace-nowrap rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:text-slate-300"
+                      <tr key={rowKey} data-testid="summary-matrix-row" className="hover:bg-slate-50/70 dark:hover:bg-slate-800/50">
+                        <td className="pl-3.5 pr-2 py-3 font-mono text-xs font-medium text-slate-900 dark:text-slate-100">
+                          <div className="flex items-start gap-1.5">
+                            <span className="break-all">{r.indicator}</span>
+                            <button
+                              type="button"
+                              data-testid="copy-indicator-value-btn"
+                              data-copied={isValueCopied ? 'true' : 'false'}
+                              onClick={() => triggerClipboardCopy(r.indicator, valCopyKey)}
+                              aria-label={`Copy indicator value ${r.indicator} to clipboard`}
+                              title={isValueCopied ? `Copied ${r.indicator}` : `Copy ${r.indicator} to clipboard`}
+                              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors cursor-pointer ${
+                                isValueCopied
+                                  ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300'
+                                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                              }`}
+                            >
+                              {isValueCopied ? (
+                                <Check className="h-3 w-3" aria-hidden="true" />
+                              ) : (
+                                <ClipboardCopy className="h-3 w-3" aria-hidden="true" />
+                              )}
+                            </button>
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1 font-sans">
+                            {rowTags.map((tag) => (
+                              <span
+                                key={tag}
+                                data-testid="table-assigned-tag"
+                                className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 dark:text-slate-200"
+                              >
+                                <span>{tag}</span>
+                                <button
+                                  type="button"
+                                  data-testid="row-remove-tag-btn"
+                                  onClick={() => handleRemoveTag(r.indicator, tag)}
+                                  aria-label={`Remove tag ${tag} from ${r.indicator}`}
+                                  className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
                                 >
-                                  {tag}
-                                </span>
-                              ))}
-                            </div>
-                          )}
+                                  <X className="h-2.5 w-2.5" aria-hidden="true" />
+                                </button>
+                              </span>
+                            ))}
+                            <button
+                              type="button"
+                              data-testid="row-add-tag-button"
+                              aria-expanded={isRowTagOpen}
+                              onClick={() => {
+                                setTableTaggingIndicator(isRowTagOpen ? null : r.indicator);
+                                setTableCustomTagInput('');
+                              }}
+                              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                isRowTagOpen
+                                  ? 'border-slate-900 dark:border-slate-100 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-950'
+                                  : 'border-dashed border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
+                              }`}
+                            >
+                              <Tag className="h-2.5 w-2.5" aria-hidden="true" />
+                              <span>+ Tag</span>
+                            </button>
+                            {(() => {
+                              const key = r.indicator.trim().toLowerCase();
+                              const isWatched = isWatchlistIndicator(watchlistItems, r.indicator);
+                              const rowOverallVerdict =
+                                overallVerdictByIndicator.get(key) ?? (r.status === 'ok' ? r.verdict : null);
+                              return (
+                                <button
+                                  type="button"
+                                  data-testid="row-watch-toggle-btn"
+                                  aria-pressed={isWatched}
+                                  onClick={() =>
+                                    handleToggleWatchIoc(
+                                      r.indicator,
+                                      r.type,
+                                      rowOverallVerdict,
+                                      confidence?.confidenceScore ?? null,
+                                    )
+                                  }
+                                  className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                                    isWatched
+                                      ? 'border-red-300 dark:border-red-800 bg-red-50/70 dark:bg-red-950/40 text-red-700 dark:text-red-300'
+                                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
+                                  }`}
+                                >
+                                  <Eye className="h-2.5 w-2.5" aria-hidden="true" />
+                                  <span>{isWatched ? 'Watching' : 'Watch'}</span>
+                                </button>
+                              );
+                            })()}
+                          </div>
                         </td>
-                        <td className="px-2.5 py-3 font-mono text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.type}</td>
-                        <td className="px-2.5 py-3 text-xs font-medium text-slate-800 dark:text-slate-200">
+                        <td className="px-2 py-3 font-mono text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.type}</td>
+                        <td className="px-2 py-3 text-xs font-medium text-slate-800 dark:text-slate-200">
                           {r.source}
                         </td>
-                        <td className="px-2.5 py-3 whitespace-nowrap">
+                        <td className="px-2 py-3 whitespace-nowrap">
                           <VerdictIndicator verdict={r.verdict} status={r.status} />
                         </td>
                         <td
-                          className="px-2.5 py-3 text-right whitespace-nowrap"
+                          className="px-2 py-3 text-right whitespace-nowrap"
                           title={confidence?.explanation || 'No active scores'}
                         >
                           {confidence && confidence.confidenceScore !== null ? (
@@ -1819,11 +3047,14 @@ export function InvestigateView({
                             <span className="font-mono text-xs text-slate-400 dark:text-slate-500">—</span>
                           )}
                         </td>
-                        <td className="px-2.5 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums">
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <ConfidenceSparkline indicator={r.indicator} trend={trend} />
+                        </td>
+                        <td className="px-2 py-3 text-right font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums whitespace-nowrap">
                           {r.score}
                         </td>
-                        <td className="px-2.5 py-3 text-xs text-slate-600 dark:text-slate-300">{r.summary}</td>
-                        <td className="pl-2.5 pr-4 py-3 text-right whitespace-nowrap">
+                        <td className="px-2 py-3 text-xs text-slate-600 dark:text-slate-300 max-w-[200px] leading-snug">{r.summary}</td>
+                        <td className="pl-2 pr-3.5 py-3 text-right whitespace-nowrap">
                           <button
                             type="button"
                             data-testid="copy-ioc-button"
@@ -1854,8 +3085,8 @@ export function InvestigateView({
                   })}
                   {filteredResults.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
-                        No results match the selected verdict filter.
+                      <td colSpan={9} className="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                        No results match the active verdict or tag filters.
                       </td>
                     </tr>
                   )}
@@ -1991,6 +3222,8 @@ export function InvestigateView({
             </div>
           </section>
 
+          <IocEventTimeline results={state.results} />
+
           <IocNetworkGraph
             results={filteredResults}
             theme={theme}
@@ -2057,6 +3290,34 @@ export function InvestigateView({
                         <Tag className="h-3 w-3" aria-hidden="true" />
                         <span>Add Tag</span>
                       </button>
+                      {(() => {
+                        const key = group.indicator.trim().toLowerCase();
+                        const isWatched = isWatchlistIndicator(watchlistItems, group.indicator);
+                        const cardVerdict = overallVerdictByIndicator.get(key) ?? null;
+                        return (
+                          <button
+                            type="button"
+                            data-testid="card-watch-toggle-btn"
+                            aria-pressed={isWatched}
+                            onClick={() =>
+                              handleToggleWatchIoc(
+                                group.indicator,
+                                group.type as IndicatorType,
+                                cardVerdict,
+                                confidence?.confidenceScore ?? null,
+                              )
+                            }
+                            className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              isWatched
+                                ? 'border-red-300 dark:border-red-800 bg-red-50/70 dark:bg-red-950/40 text-red-700 dark:text-red-300'
+                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
+                            }`}
+                          >
+                            <Eye className="h-3 w-3" aria-hidden="true" />
+                            <span>{isWatched ? 'Watching' : 'Watch'}</span>
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -2269,19 +3530,89 @@ export function InvestigateView({
       )}
         </div>
 
-        <div className="lg:sticky lg:top-20">
-          <RecentInvestigationsSidebar
-            entries={recentHistory}
-            indicatorTags={indicatorTags}
-            activeEntryId={activeHistoryId}
-            isRunning={loading}
-            onViewDetails={handleViewRecentDetails}
-            onRerun={handleRerunRecent}
-            onTogglePinEntry={handleTogglePinRecent}
-            onRenameEntry={handleRenameRecent}
-            onRemoveEntry={handleRemoveRecent}
-            onClearAll={handleClearRecent}
-          />
+        <div className="lg:sticky lg:top-20 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+          <div
+            role="tablist"
+            aria-label="Investigation sidebar views"
+            data-testid="sidebar-tab-switcher"
+            className="grid grid-cols-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sidebarTab === 'recent'}
+              data-testid="sidebar-tab-recent"
+              onClick={() => setSidebarTab('recent')}
+              className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold transition-colors cursor-pointer border-b-2 ${
+                sidebarTab === 'recent'
+                  ? 'border-red-600 text-slate-950 dark:text-slate-50 bg-white dark:bg-slate-900'
+                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+              }`}
+            >
+              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>Recent</span>
+              <span className="font-mono text-[11px] font-normal text-slate-400 dark:text-slate-500 tabular-nums">
+                ({recentHistory.length})
+              </span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sidebarTab === 'watchlist'}
+              data-testid="sidebar-tab-watchlist"
+              onClick={() => setSidebarTab('watchlist')}
+              className={`flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-semibold transition-colors cursor-pointer border-b-2 ${
+                sidebarTab === 'watchlist'
+                  ? 'border-red-600 text-slate-950 dark:text-slate-50 bg-white dark:bg-slate-900'
+                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+              }`}
+            >
+              <Eye className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>Watchlist</span>
+              <span className="font-mono text-[11px] font-normal text-slate-400 dark:text-slate-500 tabular-nums">
+                ({watchlistItems.length})
+              </span>
+              {unreadWatchlistCount > 0 && (
+                <span
+                  data-testid="watchlist-notification-badge"
+                  aria-label={`${unreadWatchlistCount} unread watchlist updates`}
+                  className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white tabular-nums"
+                >
+                  {unreadWatchlistCount}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {sidebarTab === 'recent' ? (
+            <RecentInvestigationsSidebar
+              embedded
+              entries={recentHistory}
+              indicatorTags={indicatorTags}
+              activeEntryId={activeHistoryId}
+              selectedRegion={recentRegionFilter}
+              onClearRegionFilter={onClearRecentRegionFilter}
+              isRunning={loading}
+              onViewDetails={handleViewRecentDetails}
+              onRerun={handleRerunRecent}
+              onTogglePinEntry={handleTogglePinRecent}
+              onRenameEntry={handleRenameRecent}
+              onRemoveEntry={handleRemoveRecent}
+              onClearAll={handleClearRecent}
+            />
+          ) : (
+            <WatchlistSidebarTab
+              items={watchlistItems}
+              isChecking={checkingWatchlist}
+              lastCheckedUtc={watchlistLastCheckedUtc}
+              onAddIndicator={handleAddToWatchlistFromSidebar}
+              onRemoveIndicator={handleRemoveFromWatchlist}
+              onCheckUpdatesNow={handleCheckWatchlistUpdates}
+              onInspectIndicator={handleInspectFromWatchlist}
+              onAcknowledgeItem={handleAcknowledgeWatchlistItem}
+              onAcknowledgeAll={handleAcknowledgeAllWatchlist}
+            />
+          )}
         </div>
       </div>
     </div>

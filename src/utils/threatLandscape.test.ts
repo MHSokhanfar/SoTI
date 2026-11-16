@@ -4,6 +4,8 @@ import * as d3 from 'd3';
 import type { LookupResult } from './indicators';
 import {
   aggregateThreatLandscape,
+  getLandmassRegionSummary,
+  mergeRealTimeLookupResults,
   resolveCountryGeo,
   WORLD_LAND_GEOJSON,
 } from './threatLandscape';
@@ -142,4 +144,27 @@ test('aggregateThreatLandscape clusters high-confidence IOCs by country and macr
   });
   assert.equal(criticalOnly.clusters.length, 1);
   assert.equal(criticalOnly.clusters[0].countryCode, 'RU');
+
+  // Verify landmass region hover summaries
+  const europeSummary = getLandmassRegionSummary('europe', highConf.clusters);
+  assert.equal(europeSummary.regionName, 'Europe');
+  assert.equal(europeSummary.threatCount, 1);
+  assert.equal(europeSummary.highCount, 1);
+  assert.equal(europeSummary.topCountries[0].countryCode, 'DE');
+
+  const asiaSummary = getLandmassRegionSummary('asia', highConf.clusters);
+  assert.equal(asiaSummary.regionName, 'Asia & Eurasia');
+  assert.equal(asiaSummary.threatCount, 2);
+  assert.equal(asiaSummary.criticalCount, 2);
+
+  // Verify real-time merge prefers fresh active results
+  const freshUs = makeResult({
+    sourceId: 'virustotal',
+    indicator: '8.8.8.8',
+    verdict: 'Suspicious',
+    score: '3/90',
+  });
+  const merged = mergeRealTimeLookupResults([freshUs], results);
+  const updated8888 = merged.find((r) => r.indicator === '8.8.8.8' && r.sourceId === 'virustotal');
+  assert.equal(updated8888?.verdict, 'Suspicious');
 });

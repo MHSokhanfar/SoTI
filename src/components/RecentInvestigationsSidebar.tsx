@@ -6,6 +6,7 @@ import {
   Eye,
   FileText,
   Filter,
+  Globe,
   MoreVertical,
   Pencil,
   Pin,
@@ -29,11 +30,14 @@ import {
   getResolvedEntryTags,
   type IndicatorTagMap,
 } from '../utils/iocTags';
+import { filterRecentInvestigationsByRegion } from '../utils/heatmapAnalytics';
 
 interface RecentInvestigationsSidebarProps {
   entries: RecentInvestigationEntry[];
   indicatorTags?: IndicatorTagMap;
   activeEntryId: string | null;
+  selectedRegion?: string | null;
+  onClearRegionFilter?: () => void;
   isRunning: boolean;
   onViewDetails: (entry: RecentInvestigationEntry) => void;
   onRerun: (entry: RecentInvestigationEntry) => void;
@@ -41,6 +45,7 @@ interface RecentInvestigationsSidebarProps {
   onRenameEntry: (id: string, nextTitle: string) => void;
   onRemoveEntry: (id: string) => void;
   onClearAll: () => void;
+  embedded?: boolean;
 }
 
 interface ContextMenuState {
@@ -65,6 +70,8 @@ export function RecentInvestigationsSidebar({
   entries,
   indicatorTags = {},
   activeEntryId,
+  selectedRegion = null,
+  onClearRegionFilter,
   isRunning,
   onViewDetails,
   onRerun,
@@ -72,6 +79,7 @@ export function RecentInvestigationsSidebar({
   onRenameEntry,
   onRemoveEntry,
   onClearAll,
+  embedded = false,
 }: RecentInvestigationsSidebarProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [selectedTag, setSelectedTag] = useState<string>('All');
@@ -98,10 +106,12 @@ export function RecentInvestigationsSidebar({
 
   const orderedEntries = useMemo(() => sortRecentInvestigations(entries), [entries]);
 
-  const filteredEntries = useMemo(
-    () => filterRecentInvestigationsByTag(orderedEntries, selectedTag, indicatorTags),
-    [orderedEntries, selectedTag, indicatorTags],
-  );
+  const hasRegionFilter = Boolean(selectedRegion && selectedRegion.trim() && selectedRegion.toLowerCase() !== 'all');
+
+  const filteredEntries = useMemo(() => {
+    const byTag = filterRecentInvestigationsByTag(orderedEntries, selectedTag, indicatorTags);
+    return filterRecentInvestigationsByRegion(byTag, selectedRegion);
+  }, [orderedEntries, selectedTag, indicatorTags, selectedRegion]);
 
   const contextMenuEntry = useMemo(
     () => (contextMenu ? entries.find((item) => item.id === contextMenu.entryId) ?? null : null),
@@ -201,7 +211,11 @@ export function RecentInvestigationsSidebar({
     <aside
       aria-label="Recent Investigations"
       data-testid="recent-investigations-sidebar"
-      className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
+      className={
+        embedded
+          ? 'overflow-hidden'
+          : 'rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden'
+      }
     >
       <div className="flex items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 px-4 py-3.5">
         <div className="flex items-center gap-2 min-w-0">
@@ -210,7 +224,7 @@ export function RecentInvestigationsSidebar({
             Recent Investigations
           </h2>
           <span className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
-            ({selectedTag === 'All' ? entries.length : `${filteredEntries.length}/${entries.length}`})
+            ({selectedTag === 'All' && !hasRegionFilter ? entries.length : `${filteredEntries.length}/${entries.length}`})
           </span>
         </div>
 
@@ -222,6 +236,7 @@ export function RecentInvestigationsSidebar({
             onClick={() => {
               setExpandedId(null);
               setSelectedTag('All');
+              onClearRegionFilter?.();
               setContextMenu(null);
               setRenamingId(null);
               onClearAll();
@@ -232,6 +247,29 @@ export function RecentInvestigationsSidebar({
           </button>
         )}
       </div>
+
+      {hasRegionFilter && selectedRegion && (
+        <div
+          data-testid="recent-region-filter-banner"
+          className="flex items-center justify-between gap-2 border-b border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/35 px-4 py-2 text-xs text-red-900 dark:text-red-200"
+        >
+          <span className="inline-flex items-center gap-1.5 min-w-0 font-medium">
+            <Globe className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+            <span className="truncate">Region: {selectedRegion}</span>
+          </span>
+          {onClearRegionFilter && (
+            <button
+              type="button"
+              data-testid="clear-recent-region-filter"
+              onClick={onClearRegionFilter}
+              className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-red-700 dark:text-red-300 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <X className="h-3 w-3" aria-hidden="true" />
+              Reset
+            </button>
+          )}
+        </div>
+      )}
 
       {entries.length > 0 && availableTags.length > 0 && (
         <div
@@ -310,11 +348,19 @@ export function RecentInvestigationsSidebar({
           className="px-4 py-8 text-center"
         >
           <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
-            No investigations match tag &ldquo;{selectedTag}&rdquo;
+            No investigations match{' '}
+            {hasRegionFilter && selectedTag !== 'All'
+              ? `region "${selectedRegion}" and tag "${selectedTag}"`
+              : hasRegionFilter
+                ? `region "${selectedRegion}"`
+                : `tag "${selectedTag}"`}
           </p>
           <button
             type="button"
-            onClick={() => setSelectedTag('All')}
+            onClick={() => {
+              setSelectedTag('All');
+              onClearRegionFilter?.();
+            }}
             className="mt-2 inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer"
           >
             Show all ({entries.length})

@@ -151,6 +151,40 @@ export function filterRecentInvestigationsByTag(
   );
 }
 
+export function getUniqueTagsForIndicators(
+  tagMap: IndicatorTagMap,
+  indicators: readonly string[],
+): string[] {
+  return collectTagsForIndicators(tagMap, indicators).sort((a, b) => a.localeCompare(b));
+}
+
+export function indicatorMatchesTagFilter(
+  tagMap: IndicatorTagMap,
+  indicator: string,
+  selectedTag: string,
+): boolean {
+  const normalizedFilter = normalizeTagLabel(selectedTag);
+  if (!normalizedFilter || normalizedFilter.toLowerCase() === 'all') {
+    return true;
+  }
+  const targetLower = normalizedFilter.toLowerCase();
+  return getTagsForIndicator(tagMap, indicator).some(
+    (tag) => tag.toLowerCase() === targetLower,
+  );
+}
+
+export function filterItemsByIndicatorTag<T extends { indicator: string }>(
+  items: readonly T[],
+  selectedTag: string,
+  tagMap: IndicatorTagMap,
+): T[] {
+  const normalizedFilter = normalizeTagLabel(selectedTag);
+  if (!normalizedFilter || normalizedFilter.toLowerCase() === 'all') {
+    return [...items];
+  }
+  return items.filter((item) => indicatorMatchesTagFilter(tagMap, item.indicator, normalizedFilter));
+}
+
 export function loadIndicatorTags(storage?: StorageLike | null): IndicatorTagMap {
   if (!storage) return {};
   try {

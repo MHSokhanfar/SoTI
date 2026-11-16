@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import express from 'express';
 import nodemailer from 'nodemailer';
+import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import {
   computeAbuseIpdbVerdict,
@@ -43,11 +45,14 @@ import {
   buildCustomEndpointUrl,
   buildHeartbeatEndpoint,
   BUILTIN_EXTRA_IDS,
+  BUILTIN_KEY_ENV_VAR_BY_ID,
   cloneDefaultApiSettings,
   DEFAULT_API_SETTINGS,
   evaluateHeartbeatResponse,
   EXTRA_PROVIDER_META,
   getAllConfiguredQuotaLimits,
+  isEditableThreatIntelEnvVar,
+  maskSecretHint,
   resolveSelectedSources,
   validateAndNormalizeApiSettings,
   validateSingleProviderUrl,
@@ -69,6 +74,11 @@ import {
   validateAndNormalizeScheduleInput,
   type ScheduledJob,
 } from './src/utils/scheduler';
+import {
+  isShareSnapshotExpired,
+  normalizeShareTtlHours,
+  type SharedReportSnapshot,
+} from './src/utils/reportSharing';
 
 const PORT = 3000;
 const ROOT_DIR = process.cwd();
@@ -76,6 +86,8 @@ const REPORTS_DIR = path.join(ROOT_DIR, 'reports');
 const LOGS_DIR = path.join(ROOT_DIR, 'logs');
 const CONFIG_DIR = path.join(ROOT_DIR, 'config');
 const API_SETTINGS_FILE = path.join(CONFIG_DIR, 'api_settings.json');
+const PROVIDER_KEYS_FILE = path.join(CONFIG_DIR, 'provider_keys.json');
+const SHARED_REPORTS_FILE = path.join(CONFIG_DIR, 'shared_reports.json');
 const SCHEDULES_FILE = path.join(CONFIG_DIR, 'schedules.json');
 const QUOTA_USAGE_FILE = path.join(CONFIG_DIR, 'quota_usage.json');
 const EMAIL_ALERTS_CONFIG_FILE = path.join(CONFIG_DIR, 'email_alerts_config.json');
@@ -128,6 +140,53 @@ async function loadApiSettings(): Promise<ApiSettings> {
 async function saveApiSettings(settings: ApiSettings): Promise<void> {
   await ensureDirs();
   await fs.writeFile(API_SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+}
+
+async function loadPersistedProviderKeys(settings?: ApiSettings): Promise<Record<string, string>> {
+  try {
+    const raw = await fs.readFile(PROVIDER_KEYS_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const envName = k.trim().toUpperCase();
+      if (typeof v === 'string' && v.trim() && isEditableThreatIntelEnvVar(envName, settings)) {
+        out[envName] = v.trim();
+        process.env[envName] = v.trim();
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function savePersistedProviderKeys(keysMap: Record<string, string>): Promise<void> {
+  await ensureDirs();
+  await fs.writeFile(PROVIDER_KEYS_FILE, JSON.stringify(keysMap, null, 2) + '\n', 'utf-8');
+}
+
+async function loadSharedReports(): Promise<SharedReportSnapshot[]> {
+  try {
+    const raw = await fs.readFile(SHARED_REPORTS_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const now = new Date();
+    return parsed.filter(
+      (item): item is SharedReportSnapshot =>
+        item &&
+        typeof item.token === 'string' &&
+        typeof item.expiresAt === 'string' &&
+        !isShareSnapshotExpired(item.expiresAt, now),
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function saveSharedReports(snapshots: SharedReportSnapshot[]): Promise<void> {
+  await ensureDirs();
+  await fs.writeFile(SHARED_REPORTS_FILE, JSON.stringify(snapshots, null, 2) + '\n', 'utf-8');
 }
 
 async function loadSchedules(): Promise<ScheduledJob[]> {
@@ -306,7 +365,7 @@ async function dispatchThresholdEmail(params: {
 async function maybeSendThresholdEmailAlert(params: {
   results: LookupResult[];
   mode: 'sample' | 'live';
-  reportFile: string;
+  reportFile?: string | null;
 }): Promise<{
   triggered: boolean;
   record: EmailAlertRecord | null;
@@ -585,6 +644,12 @@ async function lookupLiveVirusTotal(
     if (label) details['Threat Label'] = label;
   }
 
+  if (attrs.creation_date) {
+    details['Creation Date'] = new Date(attrs.creation_date * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  }
+  if (attrs.last_modification_date) {
+    details['Last Modified'] = new Date(attrs.last_modification_date * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  }
   if (attrs.last_analysis_date) {
     details['Last Analysis'] = new Date(attrs.last_analysis_date * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   }
@@ -1298,6 +1363,11 @@ async function lookupSample(
       }
     }
 
+    details['Last Analysis'] = '2026-11-14 16:45 UTC';
+    if (itype === 'domain') {
+      details['Creation Date'] = isClean ? '1997-09-15 04:00 UTC' : '2026-11-01 14:15 UTC';
+    }
+
     return {
       source,
       sourceId,
@@ -1473,8 +1543,54 @@ function parseCsvFile(content: string): Record<string, string>[] {
   });
 }
 
+async function buildConfigStatusPayload(settings: ApiSettings) {
+  const keys = getEnvKeys();
+  const customKeys: Record<string, boolean> = {};
+  const maskedHints: Record<string, string> = {
+    virustotal: maskSecretHint(keys.virustotal),
+    abuseipdb: maskSecretHint(keys.abuseipdb),
+    alienvault: maskSecretHint(keys.alienvault),
+    shodan: maskSecretHint(keys.shodan),
+    threatfox: maskSecretHint(keys.threatfox),
+    urlscan: maskSecretHint(keys.urlscan),
+  };
+  for (const cp of settings.customProviders || []) {
+    const val = cleanEnvKey(cp.envVarName);
+    customKeys[cp.id] = Boolean(val);
+    maskedHints[cp.id] = maskSecretHint(val);
+  }
+
+  return {
+    keys: {
+      virustotal: Boolean(keys.virustotal),
+      abuseipdb: Boolean(keys.abuseipdb),
+      alienvault: Boolean(keys.alienvault),
+    },
+    extraKeys: {
+      shodan: Boolean(keys.shodan),
+      threatfox: Boolean(keys.threatfox),
+      urlscan: Boolean(keys.urlscan),
+    },
+    customKeys,
+    maskedHints,
+    anyKeyConfigured: Boolean(
+      keys.virustotal ||
+        keys.abuseipdb ||
+        keys.alienvault ||
+        keys.shodan ||
+        keys.threatfox ||
+        keys.urlscan ||
+        Object.values(customKeys).some(Boolean),
+    ),
+    allKeysConfigured: Boolean(keys.virustotal && keys.abuseipdb && keys.alienvault),
+  };
+}
+
 async function createApp() {
   await ensureDirs();
+  const bootSettings = await loadApiSettings();
+  await loadPersistedProviderKeys(bootSettings);
+
   const app = express();
   app.use(express.json());
 
@@ -1483,36 +1599,54 @@ async function createApp() {
   });
 
   app.get('/api/config/status', async (_req, res) => {
-    const keys = getEnvKeys();
     const settings = await loadApiSettings();
-    const customKeys: Record<string, boolean> = {};
-    for (const cp of settings.customProviders || []) {
-      customKeys[cp.id] = Boolean(cleanEnvKey(cp.envVarName));
+    res.json(await buildConfigStatusPayload(settings));
+  });
+
+  app.put('/api/config/keys', async (req, res) => {
+    const settings = await loadApiSettings();
+    const rawProviderId = typeof req.body?.providerId === 'string' ? req.body.providerId.trim() : '';
+    const customMatch = rawProviderId
+      ? (settings.customProviders || []).find((c) => c.id === rawProviderId)
+      : undefined;
+    const resolvedEnvName =
+      typeof req.body?.envVarName === 'string' && req.body.envVarName.trim()
+        ? req.body.envVarName.trim().toUpperCase()
+        : (BUILTIN_KEY_ENV_VAR_BY_ID as Record<string, string>)[rawProviderId] ||
+          customMatch?.envVarName ||
+          '';
+
+    if (!resolvedEnvName || !isEditableThreatIntelEnvVar(resolvedEnvName, settings)) {
+      res.status(400).json({
+        error: 'Unsupported or restricted environment variable name. Only threat intelligence provider API keys may be modified.',
+      });
+      return;
     }
 
-    res.json({
-      keys: {
-        virustotal: Boolean(keys.virustotal),
-        abuseipdb: Boolean(keys.abuseipdb),
-        alienvault: Boolean(keys.alienvault),
-      },
-      extraKeys: {
-        shodan: Boolean(keys.shodan),
-        threatfox: Boolean(keys.threatfox),
-        urlscan: Boolean(keys.urlscan),
-      },
-      customKeys,
-      anyKeyConfigured: Boolean(
-        keys.virustotal ||
-          keys.abuseipdb ||
-          keys.alienvault ||
-          keys.shodan ||
-          keys.threatfox ||
-          keys.urlscan ||
-          Object.values(customKeys).some(Boolean),
-      ),
-      allKeysConfigured: Boolean(keys.virustotal && keys.abuseipdb && keys.alienvault),
-    });
+    const shouldClear = Boolean(req.body?.clear);
+    const nextValue = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+
+    if (!shouldClear && nextValue.length < 4) {
+      res.status(400).json({
+        error: 'API key must be at least 4 characters (or select Clear to remove the key).',
+      });
+      return;
+    }
+
+    const persisted = await loadPersistedProviderKeys(settings);
+    if (shouldClear || !nextValue) {
+      delete persisted[resolvedEnvName];
+      delete process.env[resolvedEnvName];
+      await appendLog('INFO', `Cleared API key for ${resolvedEnvName} from GUI settings`);
+    } else {
+      persisted[resolvedEnvName] = nextValue;
+      process.env[resolvedEnvName] = nextValue;
+      await appendLog('INFO', `Updated API key for ${resolvedEnvName} from GUI settings (${maskSecretHint(nextValue)})`);
+    }
+    await savePersistedProviderKeys(persisted);
+
+    const statusPayload = await buildConfigStatusPayload(settings);
+    res.json({ ok: true, envVarName: resolvedEnvName, ...statusPayload });
   });
 
   app.get('/api/quota', async (_req, res) => {
@@ -1755,12 +1889,13 @@ async function createApp() {
     sources?: unknown;
     requestedMode?: unknown;
     parallel?: boolean;
+    backgroundPoll?: boolean;
   }): Promise<
     | { ok: false; errorStatus: number; error: string; invalid: string[] }
     | {
         ok: true;
         mode: 'live' | 'sample';
-        reportFile: string;
+        reportFile: string | null;
         invalid: string[];
         results: LookupResult[];
         quotaSkipped: { providerId: string; name: string; used: number; limit: number; reason: string }[];
@@ -1935,11 +2070,19 @@ async function createApp() {
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
-    const filename = `soti_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
-    const csvPath = path.join(REPORTS_DIR, filename);
-    const csvContent = serializeResultsToCsv(results, now.toISOString().slice(0, 19));
-    await fs.writeFile(csvPath, csvContent, 'utf-8');
-    await appendLog('INFO', `Saved CSV report with ${results.length} rows to ${filename}`);
+    let filename: string | null = null;
+    if (!opts.backgroundPoll) {
+      filename = `soti_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+      const csvPath = path.join(REPORTS_DIR, filename);
+      const csvContent = serializeResultsToCsv(results, now.toISOString().slice(0, 19));
+      await fs.writeFile(csvPath, csvContent, 'utf-8');
+      await appendLog('INFO', `Saved CSV report with ${results.length} rows to ${filename}`);
+    } else {
+      await appendLog(
+        'INFO',
+        `LIVE POLL | Refreshed ${valid.length} active IOC(s) across ${availableSources.length} provider(s) (${results.length} rows)`,
+      );
+    }
 
     const emailAlert = await maybeSendThresholdEmailAlert({
       results,
@@ -2255,6 +2398,7 @@ async function createApp() {
       sources: req.body?.sources,
       requestedMode: req.body?.mode,
       parallel: Boolean(req.body?.parallel),
+      backgroundPoll: Boolean(req.body?.backgroundPoll),
     });
     if (outcome.ok === false) {
       res.status(outcome.errorStatus).json({
@@ -2386,6 +2530,154 @@ async function createApp() {
       res.json({ name: safeName, rows: parseCsvFile(text) });
     } catch {
       res.status(404).json({ error: 'Report not found.' });
+    }
+  });
+
+  app.post('/api/reports/executive-summary', async (req, res) => {
+    const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!geminiKey) {
+      res.status(503).json({
+        error: 'GEMINI_API_KEY is not configured on the server environment. Set GEMINI_API_KEY in server secrets to enable AI executive summaries.',
+      });
+      return;
+    }
+
+    const reportName = typeof req.body?.reportName === 'string' ? req.body.reportName : null;
+    const verdictFilter = typeof req.body?.verdictFilter === 'string' ? req.body.verdictFilter : 'All';
+    const searchQuery = typeof req.body?.searchQuery === 'string' ? req.body.searchQuery : '';
+    const quickStats = req.body?.quickStats && typeof req.body.quickStats === 'object' ? req.body.quickStats : {};
+    const totals = req.body?.totals && typeof req.body.totals === 'object' ? req.body.totals : {};
+    const trendSummary = req.body?.trendSummary && typeof req.body.trendSummary === 'object' ? req.body.trendSummary : {};
+    const rowsSample = Array.isArray(req.body?.rowsSample) ? req.body.rowsSample.slice(0, 35) : [];
+
+    const promptLines = [
+      'You are a Senior Threat Intelligence Lead writing a concise executive summary for SOC leadership.',
+      'Analyze the provided investigation telemetry and produce a factual, structured briefing (around 150-220 words):',
+      '1) Executive Risk Assessment (2-3 sentences highlighting threat severity and prevalence)',
+      '2) Key Findings & Indicators (3 concise bullet points referencing highest-risk IOCs, providers, and patterns)',
+      '3) Recommended Immediate Actions (2 concise bullet points)',
+      '',
+      `Active Report: ${reportName || 'Aggregate Historical Archive'}`,
+      `Applied Filters: verdict=${verdictFilter}${searchQuery ? `, search="${searchQuery}"` : ''}`,
+      `Quick Stats: totalThreats=${quickStats.totalThreatsAnalyzed ?? 0}, uniqueIOCs=${quickStats.uniqueIndicatorsCount ?? 0}, maliciousRate=${quickStats.maliciousPercentage ?? 0}%, maliciousCount=${quickStats.maliciousCount ?? 0}, topType=${quickStats.topIndicatorLabel ?? 'N/A'}`,
+      `Verdict Totals: runs=${totals.runs ?? 0}, malicious=${totals.malicious ?? 0}, suspicious=${totals.suspicious ?? 0}, clean=${totals.clean ?? 0}, unknown=${totals.unknown ?? 0}`,
+      `30-Day Alert Trend: totalAlerts=${trendSummary.totalAlerts ?? 0}, peakAlerts=${trendSummary.peakAlerts ?? 0} (${trendSummary.peakDateLabel ?? 'N/A'}), activeDays=${trendSummary.activeAlertDays ?? 0}/30`,
+      '',
+      'Visible Investigation Rows Sample:',
+      ...rowsSample.map((row: any, idx: number) =>
+        `${idx + 1}. ${String(row?.indicator || '')} [${String(row?.type || '')}] | ${String(row?.source || '')} | verdict=${String(row?.verdict || '')} | score=${String(row?.score || '')}${row?.confidenceScore != null ? ` | weightedConfidence=${row.confidenceScore}/100` : ''} | ${String(row?.summary || '')}`,
+      ),
+    ];
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: geminiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: promptLines.join('\n'),
+      });
+      const summaryText = (response.text || '').trim();
+      if (!summaryText) {
+        res.status(502).json({ error: 'Gemini returned an empty summary response.' });
+        return;
+      }
+      await appendLog('INFO', `Generated Gemini AI executive summary (${reportName || 'archive'})`);
+      res.json({
+        summary: summaryText,
+        model: 'gemini-4-hydrogen',
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      await appendLog('ERROR', `Gemini AI executive summary failed: ${err?.message || 'Unknown error'}`);
+      res.status(502).json({
+        error: `Unable to generate AI executive summary: ${err?.message || 'Upstream Gemini request failed.'}`,
+      });
+    }
+  });
+
+  app.post('/api/reports/share', async (req, res) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const ttlHours = normalizeShareTtlHours(body.ttlHours ?? 24);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlHours * 3_600_000).toISOString();
+    const token = randomBytes(12).toString('base64url');
+
+    const snapshot: SharedReportSnapshot = {
+      token,
+      createdAt: now.toISOString(),
+      expiresAt,
+      ttlHours,
+      reportName: typeof body.reportName === 'string' && body.reportName.trim() ? body.reportName.trim() : null,
+      searchQuery: typeof body.searchQuery === 'string' ? body.searchQuery.slice(0, 120) : '',
+      verdictFilter: typeof body.verdictFilter === 'string' ? body.verdictFilter.slice(0, 32) : 'All',
+      quickStats: {
+        totalThreatsAnalyzed: Number(body.quickStats?.totalThreatsAnalyzed || 0),
+        uniqueIndicatorsCount: Number(body.quickStats?.uniqueIndicatorsCount || 0),
+        maliciousPercentage: Number(body.quickStats?.maliciousPercentage || 0),
+        maliciousCount: Number(body.quickStats?.maliciousCount || 0),
+        evaluatedVerdictsCount: Number(body.quickStats?.evaluatedVerdictsCount || 0),
+      },
+      totals: {
+        runs: Number(body.totals?.runs || 0),
+        malicious: Number(body.totals?.malicious || 0),
+        suspicious: Number(body.totals?.suspicious || 0),
+        clean: Number(body.totals?.clean || 0),
+        unknown: Number(body.totals?.unknown || 0),
+      },
+      topIndicators: Array.isArray(body.topIndicators)
+        ? body.topIndicators.slice(0, 8).map((item: any) => ({
+            indicator: String(item?.indicator || ''),
+            type: String(item?.type || ''),
+            confidenceScore:
+              typeof item?.confidenceScore === 'number' && Number.isFinite(item.confidenceScore)
+                ? item.confidenceScore
+                : null,
+            verdictSummary: String(item?.verdictSummary || ''),
+          }))
+        : [],
+      executiveSummary:
+        typeof body.executiveSummary === 'string' && body.executiveSummary.trim()
+          ? body.executiveSummary.trim().slice(0, 4000)
+          : null,
+    };
+
+    const existing = await loadSharedReports();
+    const next = [snapshot, ...existing].slice(0, 100);
+    await saveSharedReports(next);
+    await appendLog(
+      'INFO',
+      `Created temporary shared report link (${token}, TTL ${ttlHours}h, report: ${snapshot.reportName || 'archive'})`,
+    );
+    res.status(201).json({
+      snapshot,
+      sharePath: `/?share=${encodeURIComponent(token)}`,
+    });
+  });
+
+  app.get('/api/reports/share/:token', async (req, res) => {
+    const token = String(req.params.token || '').trim();
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(token)) {
+      res.status(400).json({ error: 'Invalid share token format.' });
+      return;
+    }
+    try {
+      const raw = await fs.readFile(SHARED_REPORTS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const list = Array.isArray(parsed) ? (parsed as SharedReportSnapshot[]) : [];
+      const found = list.find((s) => s && s.token === token);
+      if (!found) {
+        res.status(404).json({ error: 'Shared report snapshot not found or revoked.' });
+        return;
+      }
+      if (isShareSnapshotExpired(found.expiresAt)) {
+        res.status(410).json({ error: 'This temporary shared report link has expired.' });
+        return;
+      }
+      res.json({ snapshot: found });
+    } catch {
+      res.status(404).json({ error: 'Shared report snapshot not found.' });
     }
   });
 

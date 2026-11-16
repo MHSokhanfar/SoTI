@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
-import { Globe, Network, Search, ShieldAlert } from 'lucide-react';
+import { ArrowRight, Globe, Network, Search, ShieldAlert, X } from 'lucide-react';
 import {
   buildIocHeatmapMatrix,
   csvRowsToLookupResults,
@@ -20,7 +20,9 @@ interface IocRegionHeatmapProps {
   reportCount: number;
   theme?: ThemeMode;
   loading?: boolean;
+  activeRegionFilter?: string | null;
   onInspectIndicator?: (indicator: string) => void;
+  onFilterRecentByRegion?: (regionLabel: string | null, options?: { navigate?: boolean }) => void;
 }
 
 const COLUMN_HINTS: Record<RiskTierBucketId, string> = {
@@ -69,7 +71,9 @@ export function IocRegionHeatmap({
   reportCount,
   theme = 'light',
   loading = false,
+  activeRegionFilter = null,
   onInspectIndicator,
+  onFilterRecentByRegion,
 }: IocRegionHeatmapProps) {
   const isDark = theme === 'dark';
   const [dimension, setDimension] = useState<HeatmapDimension>('region');
@@ -193,20 +197,36 @@ export function IocRegionHeatmap({
 
     // Row labels (Geographic Region or Network Segment)
     const yLabelColor = isDark ? '#CBD5E1' : '#334155';
+    const yActiveColor = isDark ? '#F87171' : '#DC2626';
     const ySubColor = isDark ? '#64748B' : '#94A3B8';
     const rowLabelGroup = rootG.append('g').attr('class', 'heatmap-y-labels');
 
     rowLabelGroup
-      .selectAll('g.y-label-item')
+      .selectAll<SVGGElement, (typeof matrix.rows)[number]>('g.y-label-item')
       .data(matrix.rows)
       .join('g')
       .attr('class', 'y-label-item')
+      .attr('data-testid', (_row, idx) => `heatmap-region-row-${idx}`)
+      .attr('data-region', (row) => row.key)
       .attr(
         'transform',
         (row) => `translate(-8, ${(yScale(row.key) ?? 0) + yScale.bandwidth() / 2})`,
       )
+      .style('cursor', dimension === 'region' && onFilterRecentByRegion ? 'pointer' : 'default')
+      .on('click', (_event, row) => {
+        if (dimension !== 'region' || !onFilterRecentByRegion) return;
+        const isAlreadyActive =
+          activeRegionFilter?.trim().toLowerCase() === row.key.trim().toLowerCase();
+        onFilterRecentByRegion(isAlreadyActive ? null : row.key, { navigate: false });
+      })
       .each(function (row) {
         const g = d3.select(this);
+        const isRowActive =
+          dimension === 'region' &&
+          Boolean(
+            activeRegionFilter &&
+              activeRegionFilter.trim().toLowerCase() === row.key.trim().toLowerCase(),
+          );
         const maxChars = isNarrow ? 16 : width < 600 ? 22 : 28;
         const truncated =
           row.key.length > maxChars ? `${row.key.slice(0, maxChars - 1)}…` : row.key;
@@ -215,12 +235,16 @@ export function IocRegionHeatmap({
           .attr('y', -2)
           .attr('text-anchor', 'end')
           .attr('dominant-baseline', 'middle')
-          .attr('fill', yLabelColor)
+          .attr('fill', isRowActive ? yActiveColor : yLabelColor)
           .attr('font-size', isNarrow ? '10.5px' : '11.5px')
-          .attr('font-weight', '500')
-          .text(truncated)
+          .attr('font-weight', isRowActive ? '700' : '500')
+          .text(isRowActive ? `● ${truncated}` : truncated)
           .append('title')
-          .text(row.key);
+          .text(
+            dimension === 'region'
+              ? `Click to filter Recent Investigations by ${row.key}`
+              : row.key,
+          );
 
         g.append('text')
           .attr('x', 0)
@@ -272,9 +296,14 @@ export function IocRegionHeatmap({
       })
       .on('click', (_event, cell) => {
         if (cell.count > 0) {
-          setSelectedCell((prev) =>
-            prev && prev.rowKey === cell.rowKey && prev.colKey === cell.colKey ? null : cell,
-          );
+          const isSame =
+            selectedCell &&
+            selectedCell.rowKey === cell.rowKey &&
+            selectedCell.colKey === cell.colKey;
+          setSelectedCell(isSame ? null : cell);
+          if (dimension === 'region' && onFilterRecentByRegion) {
+            onFilterRecentByRegion(isSame ? null : cell.rowKey, { navigate: false });
+          }
         }
       });
 
@@ -316,7 +345,7 @@ export function IocRegionHeatmap({
         if (c.count === 0) return '0';
         return compactCells ? `${c.count}` : `${c.count} · avg ${c.avgScore}%`;
       });
-  }, [matrix, containerWidth, isDark, selectedCell]);
+  }, [matrix, containerWidth, isDark, selectedCell, dimension, activeRegionFilter, onFilterRecentByRegion]);
 
   const activeInspectionCell = selectedCell ?? hoveredCell;
 
@@ -337,7 +366,7 @@ export function IocRegionHeatmap({
             </span>
           </div>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            D3.js distribution matrix across geographic regions or network segments. Click a cell to inspect indicators.
+            D3.js distribution matrix across geographic regions or network segments. Click a region or cell to filter Recent Investigations &amp; inspect IOCs.
           </p>
         </div>
 
@@ -464,6 +493,41 @@ export function IocRegionHeatmap({
             </span>
           </div>
 
+          {activeRegionFilter && dimension === 'region' && onFilterRecentByRegion && (
+            <div
+              data-testid="heatmap-active-region-banner"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/35 px-4 py-2.5 text-xs text-red-950 dark:text-red-100"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <Globe className="h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                <span>
+                  Recent Investigations filtered to geographic region:{' '}
+                  <strong className="font-semibold">{activeRegionFilter}</strong>
+                </span>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  data-testid="heatmap-open-filtered-recent"
+                  onClick={() => onFilterRecentByRegion(activeRegionFilter, { navigate: true })}
+                  className="inline-flex items-center gap-1 font-semibold text-red-700 dark:text-red-300 hover:underline whitespace-nowrap cursor-pointer"
+                >
+                  <span>Open Recent Investigations</span>
+                  <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  data-testid="heatmap-clear-region-filter"
+                  onClick={() => onFilterRecentByRegion(null, { navigate: false })}
+                  className="inline-flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white cursor-pointer"
+                >
+                  <X className="h-3 w-3" aria-hidden="true" />
+                  <span>Clear Filter</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {activeInspectionCell && activeInspectionCell.count > 0 && (
             <div
               data-testid="heatmap-cell-inspector"
@@ -486,15 +550,30 @@ export function IocRegionHeatmap({
                     </span>
                   </div>
                 </div>
-                {selectedCell && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedCell(null)}
-                    className="text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 cursor-pointer"
-                  >
-                    Clear Selection
-                  </button>
-                )}
+                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                  {dimension === 'region' && onFilterRecentByRegion && (
+                    <button
+                      type="button"
+                      data-testid="heatmap-filter-recent-btn"
+                      onClick={() =>
+                        onFilterRecentByRegion(activeInspectionCell.rowKey, { navigate: true })
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-800 dark:text-slate-200 hover:border-red-300 dark:hover:border-red-700 hover:text-red-700 dark:hover:text-red-300 whitespace-nowrap cursor-pointer"
+                    >
+                      <Globe className="h-3 w-3" aria-hidden="true" />
+                      <span>Filter Recent Investigations</span>
+                    </button>
+                  )}
+                  {selectedCell && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCell(null)}
+                      className="text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 cursor-pointer"
+                    >
+                      Clear Selection
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="mt-3 divide-y divide-slate-200/70 dark:divide-slate-800 border-t border-slate-200/70 dark:border-slate-800">

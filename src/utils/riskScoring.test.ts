@@ -5,7 +5,11 @@ import {
   classifyConfidenceRiskLevel,
   computeAllIocConfidenceScores,
   computeIocConfidenceScore,
+  loadRiskThreshold,
   normalizeProviderRiskScore,
+  normalizeRiskThreshold,
+  passesRiskThreshold,
+  saveRiskThreshold,
 } from './riskScoring';
 
 function makeResult(overrides: Partial<LookupResult>): LookupResult {
@@ -205,4 +209,32 @@ test('computeAllIocConfidenceScores separates clean, malicious, and all-unsuppor
   assert.equal(classifyConfidenceRiskLevel(30), 'Medium');
   assert.equal(classifyConfidenceRiskLevel(10), 'Low');
   assert.equal(classifyConfidenceRiskLevel(null), 'Unknown');
+});
+
+test('risk threshold helpers clamp bounds, filter low-risk or unscored IOCs, and persist state', () => {
+  assert.equal(normalizeRiskThreshold(-15), 0);
+  assert.equal(normalizeRiskThreshold(145), 100);
+  assert.equal(normalizeRiskThreshold('52.6'), 53);
+  assert.equal(normalizeRiskThreshold('invalid'), 0);
+
+  // When threshold is 0, all indicators (including null scores) are shown
+  assert.equal(passesRiskThreshold(0, 0), true);
+  assert.equal(passesRiskThreshold(null, 0), true);
+
+  // When threshold > 0, indicators below threshold or unscored are filtered out
+  assert.equal(passesRiskThreshold(75, 50), true);
+  assert.equal(passesRiskThreshold(50, 50), true);
+  assert.equal(passesRiskThreshold(49, 50), false);
+  assert.equal(passesRiskThreshold(null, 50), false);
+
+  const mem = new Map<string, string>();
+  const storage = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      mem.set(k, v);
+    },
+  };
+  assert.equal(loadRiskThreshold(storage), 0);
+  saveRiskThreshold(storage, 65);
+  assert.equal(loadRiskThreshold(storage), 65);
 });

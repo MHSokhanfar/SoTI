@@ -22,5 +22,8 @@ logs/*
 # Playwright verification artifacts
 .playwright-cli/
 
-# Runtime GUI API configuration
+# Runtime GUI API configuration & server-side secrets
 config/api_settings.json
+config/provider_keys.json
+config/shared_reports.json
+

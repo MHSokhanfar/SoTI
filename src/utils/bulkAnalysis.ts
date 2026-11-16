@@ -20,6 +20,7 @@ export const BULK_SAMPLE_BATCH = [
 
 export interface BulkInputStats {
   totalValid: number;
+  lineCount: number;
   ipCount: number;
   domainCount: number;
   hashCount: number;
@@ -80,6 +81,10 @@ const PROVIDER_DISPLAY_ORDER = [
 
 export function summarizeBulkInputStats(rawInput: string): BulkInputStats {
   const prep = preprocessInputForLookup(rawInput);
+  const lineCount = rawInput
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean).length;
   let ipCount = 0;
   let domainCount = 0;
   let hashCount = 0;
@@ -92,12 +97,29 @@ export function summarizeBulkInputStats(rawInput: string): BulkInputStats {
 
   return {
     totalValid: prep.validIndicators.length,
+    lineCount,
     ipCount,
     domainCount,
     hashCount,
     invalidCount: prep.invalidTokens.length,
     defangedCount: prep.defangedCount,
   };
+}
+
+export function formatIndicatorsAsNewlines(rawInput: string): string {
+  const prep = preprocessInputForLookup(rawInput);
+  if (prep.parsed.length === 0) return '';
+  const uniqueTokens: string[] = [];
+  const seen = new Set<string>();
+  for (const item of prep.parsed) {
+    const token = (item.original || '').trim();
+    const key = (item.cleaned || token).toLowerCase();
+    if (token && !seen.has(key)) {
+      seen.add(key);
+      uniqueTokens.push(token);
+    }
+  }
+  return uniqueTokens.join('\n');
 }
 
 export function deduplicateBulkInputLines(rawInput: string): string {

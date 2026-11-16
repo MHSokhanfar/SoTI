@@ -4,6 +4,8 @@ import type { LookupResult } from './indicators';
 import {
   buildIocHeatmapMatrix,
   csvRowsToLookupResults,
+  extractLookupResultRegions,
+  filterRecentInvestigationsByRegion,
   formatGeographicRegion,
   formatNetworkSegment,
 } from './heatmapAnalytics';
@@ -125,3 +127,37 @@ test('csvRowsToLookupResults converts CSV rows with JSON details safely', () => 
   assert.equal(converted[0].sourceId, 'virustotal');
   assert.equal(converted[0].details.Country, 'DE');
 });
+
+test('filterRecentInvestigationsByRegion filters saved investigations by geographic region label', () => {
+  const usEntry = {
+    id: 'inv-us',
+    results: [
+      makeResult({ indicator: '8.8.8.8', details: { Country: 'US' } }),
+    ],
+  };
+  const nlEntry = {
+    id: 'inv-nl',
+    results: [
+      makeResult({ indicator: '185.220.101.4', details: { Country: 'Netherlands' } }),
+    ],
+  };
+  const hashOnlyEntry = {
+    id: 'inv-hash',
+    results: [
+      makeResult({ indicator: '44d88612fea8a8f36de82e1278abb02f', type: 'hash', details: { Name: 'eicar.com' } }),
+    ],
+  };
+
+  assert.deepEqual(extractLookupResultRegions(nlEntry.results), ['Western Europe · NL']);
+  assert.deepEqual(extractLookupResultRegions(hashOnlyEntry.results), ['Unattributed / Hash & Domain']);
+
+  const filteredUs = filterRecentInvestigationsByRegion([usEntry, nlEntry, hashOnlyEntry], 'North America · US');
+  assert.deepEqual(filteredUs.map((e) => e.id), ['inv-us']);
+
+  const filteredNl = filterRecentInvestigationsByRegion([usEntry, nlEntry, hashOnlyEntry], 'Western Europe · NL');
+  assert.deepEqual(filteredNl.map((e) => e.id), ['inv-nl']);
+
+  const allEntries = filterRecentInvestigationsByRegion([usEntry, nlEntry, hashOnlyEntry], null);
+  assert.equal(allEntries.length, 3);
+});
+

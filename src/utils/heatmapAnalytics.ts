@@ -502,3 +502,46 @@ export function buildIocHeatmapMatrix(
     totalEvaluatedIocs,
   };
 }
+
+export function extractLookupResultRegions(results: LookupResult[]): string[] {
+  const seen = new Set<string>();
+  const regions: string[] = [];
+
+  for (const r of results) {
+    const details = r.details || {};
+    const countryRaw = details.Country ?? details.country;
+    if (countryRaw !== undefined && countryRaw !== null && String(countryRaw).trim() !== '') {
+      const formatted = formatGeographicRegion(String(countryRaw));
+      if (!seen.has(formatted.regionLabel)) {
+        seen.add(formatted.regionLabel);
+        regions.push(formatted.regionLabel);
+      }
+    }
+  }
+
+  if (regions.length === 0 && results.length > 0) {
+    regions.push('Unattributed / Hash & Domain');
+  }
+
+  return regions;
+}
+
+export function entryMatchesGeographicRegion(
+  entry: { results: LookupResult[] },
+  selectedRegion: string | null | undefined,
+): boolean {
+  const target = String(selectedRegion ?? '').trim();
+  if (!target || target.toLowerCase() === 'all') return true;
+  const regions = extractLookupResultRegions(entry.results || []);
+  return regions.some((reg) => reg.toLowerCase() === target.toLowerCase());
+}
+
+export function filterRecentInvestigationsByRegion<T extends { results: LookupResult[] }>(
+  entries: T[],
+  selectedRegion: string | null | undefined,
+): T[] {
+  const target = String(selectedRegion ?? '').trim();
+  if (!target || target.toLowerCase() === 'all') return entries;
+  return entries.filter((entry) => entryMatchesGeographicRegion(entry, target));
+}
+

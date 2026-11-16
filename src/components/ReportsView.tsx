@@ -1,13 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
+  Copy,
   Download,
   FileSpreadsheet,
   FileText,
+  Link2,
   Loader2,
   RefreshCw,
   Search,
+  Share2,
+  Sparkles,
   X,
 } from 'lucide-react';
 import {
@@ -49,6 +54,12 @@ import {
   type VerdictFilterOption,
 } from '../utils/reportsAnalytics';
 import { exportReportsDashboardPdf } from '../utils/reportPdf';
+import {
+  buildShareReportMessage,
+  SHARE_TTL_OPTIONS,
+  type SharedReportSnapshot,
+} from '../utils/reportSharing';
+import { copyToClipboard } from '../utils/clipboard';
 import type { LookupResult } from '../utils/indicators';
 import type { ThemeMode } from '../utils/theme';
 import { IocRegionHeatmap } from './IocRegionHeatmap';
@@ -75,12 +86,104 @@ interface ReportsViewProps {
   theme?: ThemeMode;
   navigationTarget?: ReportsNavigationTarget | null;
   currentResults?: LookupResult[];
+  activeRegionFilter?: string | null;
+  onFilterRecentByRegion?: (regionLabel: string | null, options?: { navigate?: boolean }) => void;
+  sharedReportSnapshot?: SharedReportSnapshot | null;
+  sharedReportError?: string | null;
+  onDismissSharedReport?: () => void;
+}
+
+function renderInlineSummaryTokens(text: string): ReactNode[] {
+  const tokens = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return tokens.map((part, idx) => {
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return (
+        <strong key={idx} className="font-semibold text-slate-950 dark:text-slate-50">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code
+          key={idx}
+          className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-900 dark:text-slate-100"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return <span key={idx}>{part}</span>;
+  });
+}
+
+function renderExecutiveSummaryContent(summary: string): ReactNode {
+  const lines = summary.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let bulletBuffer: string[] = [];
+
+  const flushBullets = (keyPrefix: string) => {
+    if (bulletBuffer.length === 0) return;
+    blocks.push(
+      <ul key={keyPrefix} className="list-disc pl-5 space-y-1.5">
+        {bulletBuffer.map((item, idx) => (
+          <li key={idx} className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+            {renderInlineSummaryTokens(item)}
+          </li>
+        ))}
+      </ul>,
+    );
+    bulletBuffer = [];
+  };
+
+  lines.forEach((rawLine, idx) => {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      flushBullets(`ul-gap-${idx}`);
+      return;
+    }
+    const bulletMatch = trimmed.match(/^(?:[-*]|\u2022)\s+(.*)$/);
+    if (bulletMatch) {
+      bulletBuffer.push(bulletMatch[1]);
+      return;
+    }
+    flushBullets(`ul-${idx}`);
+    const isHeadingLine =
+      /^#{1,4}\s+/.test(trimmed) ||
+      (/^\*\*\d+\)/.test(trimmed) && trimmed.endsWith('**')) ||
+      /^\d+\)\s+[A-Z]/.test(trimmed);
+    const cleanedHeading = trimmed.replace(/^#{1,4}\s+/, '');
+    if (isHeadingLine && trimmed.length < 90) {
+      blocks.push(
+        <h3
+          key={`h-${idx}`}
+          className="pt-1 text-xs font-semibold uppercase tracking-wide text-slate-900 dark:text-slate-100"
+        >
+          {renderInlineSummaryTokens(cleanedHeading)}
+        </h3>,
+      );
+    } else {
+      blocks.push(
+        <p key={`p-${idx}`} className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+          {renderInlineSummaryTokens(trimmed)}
+        </p>,
+      );
+    }
+  });
+
+  flushBullets('ul-end');
+  return <div className="space-y-2.5">{blocks}</div>;
 }
 
 export function ReportsView({
   theme = 'light',
   navigationTarget,
   currentResults = [],
+  activeRegionFilter = null,
+  onFilterRecentByRegion,
+  sharedReportSnapshot = null,
+  sharedReportError = null,
+  onDismissSharedReport,
 }: ReportsViewProps) {
   const isDark = theme === 'dark';
   const [reports, setReports] = useState<ReportMeta[]>([]);
@@ -104,6 +207,21 @@ export function ReportsView({
   const [trendMode, setTrendMode] = useState<TrendMode>('total');
   const [searchQuery, setSearchQuery] = useState('');
   const [verdictFilter, setVerdictFilter] = useState<VerdictFilterOption>('All');
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [aiSummaryMeta, setAiSummaryMeta] = useState<{ model: string; generatedAt: string } | null>(null);
+  const [generatingSummary, setGeneratingSummary] = useState(false);
+  const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
+  const [copiedSummary, setCopiedSummary] = useState(false);
+
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareTtlHours, setShareTtlHours] = useState<number>(24);
+  const [creatingShare, setCreatingShare] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [createdShareSnapshot, setCreatedShareSnapshot] = useState<SharedReportSnapshot | null>(null);
+  const [createdShareUrl, setCreatedShareUrl] = useState<string | null>(null);
+  const [copiedShareLink, setCopiedShareLink] = useState(false);
+  const [copiedShareMessage, setCopiedShareMessage] = useState(false);
+
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const toastTimersRef = useRef<Map<string, number>>(new Map());
   const selectedNameRef = useRef<string | null>(null);
@@ -317,6 +435,135 @@ export function ReportsView({
       );
     } finally {
       setExportingPdf(false);
+    }
+  }
+
+  async function handleGenerateExecutiveSummary() {
+    if (reports.length === 0 || generatingSummary) return;
+    setGeneratingSummary(true);
+    setAiSummaryError(null);
+    setCopiedSummary(false);
+
+    try {
+      const rowsSample = filteredRows.slice(0, 35).map((r) => {
+        const conf = confidenceMap.get((r.indicator || '').trim().toLowerCase());
+        return {
+          indicator: r.indicator || '',
+          type: r.type || '',
+          source: r.source || '',
+          verdict: r.status === 'ok' ? r.verdict : r.status,
+          score: r.score || '',
+          confidenceScore: conf?.score ?? null,
+          summary: r.summary || '',
+        };
+      });
+
+      const resp = await fetch('/api/reports/executive-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reportName: selectedName,
+          verdictFilter,
+          searchQuery,
+          quickStats,
+          totals,
+          trendSummary,
+          rowsSample,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const msg = data?.error || 'Unable to generate AI executive summary.';
+        setAiSummaryError(msg);
+        pushToast({
+          variant: 'error',
+          title: 'Executive summary unavailable',
+          detail: msg,
+        });
+        return;
+      }
+
+      setAiSummary(String(data.summary || ''));
+      setAiSummaryMeta({
+        model: String(data.model || 'Gemini'),
+        generatedAt: String(data.generatedAt || new Date().toISOString()),
+      });
+      pushToast({
+        variant: 'success',
+        title: 'AI executive summary ready',
+        detail: `Synthesized ${filteredRows.length} visible row(s) with Gemini`,
+      });
+    } catch {
+      const msg = 'Network error while requesting Gemini AI executive summary.';
+      setAiSummaryError(msg);
+      pushToast({
+        variant: 'error',
+        title: 'Summary request failed',
+        detail: msg,
+      });
+    } finally {
+      setGeneratingSummary(false);
+    }
+  }
+
+  async function handleCreateShareSnapshot() {
+    if (creatingShare) return;
+    setCreatingShare(true);
+    setShareError(null);
+    setCopiedShareLink(false);
+    setCopiedShareMessage(false);
+
+    try {
+      const seenIndicators = new Set<string>();
+      const topIndicators: SharedReportSnapshot['topIndicators'] = [];
+      for (const r of filteredRows) {
+        const ind = (r.indicator || '').trim();
+        const key = ind.toLowerCase();
+        if (!ind || seenIndicators.has(key)) continue;
+        seenIndicators.add(key);
+        const conf = confidenceMap.get(key);
+        topIndicators.push({
+          indicator: ind,
+          type: r.type || 'ioc',
+          confidenceScore: conf?.score ?? null,
+          verdictSummary: r.status === 'ok' ? r.verdict || 'Unknown' : r.status || 'Unknown',
+        });
+        if (topIndicators.length >= 6) break;
+      }
+
+      const resp = await fetch('/api/reports/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ttlHours: shareTtlHours,
+          reportName: selectedName,
+          searchQuery,
+          verdictFilter,
+          quickStats,
+          totals,
+          topIndicators,
+          executiveSummary: aiSummary,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data?.snapshot) {
+        setShareError(data?.error || 'Failed to generate temporary share link.');
+        return;
+      }
+
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const url = `${origin}${data.sharePath}`;
+      setCreatedShareSnapshot(data.snapshot);
+      setCreatedShareUrl(url);
+      pushToast({
+        variant: 'success',
+        title: 'Shareable report link created',
+        detail: `Expires in ${data.snapshot.ttlHours}h`,
+      });
+    } catch {
+      setShareError('Unable to reach server to create share link.');
+    } finally {
+      setCreatingShare(false);
     }
   }
 
@@ -603,6 +850,39 @@ export function ReportsView({
 
           <button
             type="button"
+            data-testid="generate-ai-summary-btn"
+            onClick={handleGenerateExecutiveSummary}
+            disabled={reports.length === 0 || generatingSummary}
+            aria-label="Generate AI executive summary"
+            title="Use Gemini AI to draft an executive summary from visible investigation data and charts"
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
+          >
+            {generatingSummary ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-red-600 dark:text-red-400" aria-hidden="true" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5 text-red-600 dark:text-red-400" aria-hidden="true" />
+            )}
+            <span>{generatingSummary ? 'Generating...' : 'Generate Summary'}</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="share-report-button"
+            onClick={() => {
+              setShareError(null);
+              setShareModalOpen(true);
+            }}
+            disabled={reports.length === 0}
+            aria-label="Share Report"
+            title="Create a temporary shareable link or copy formatted report message"
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-100"
+          >
+            <Share2 className="h-3.5 w-3.5 text-slate-600 dark:text-slate-400" aria-hidden="true" />
+            <span>Share Report</span>
+          </button>
+
+          <button
+            type="button"
             data-testid="download-pdf-button"
             onClick={handleDownloadPdf}
             disabled={reports.length === 0 || exportingPdf}
@@ -629,6 +909,95 @@ export function ReportsView({
           </button>
         </div>
       </div>
+
+      {sharedReportError && (
+        <div
+          role="alert"
+          data-testid="shared-report-error-banner"
+          className="flex items-center justify-between gap-3 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-xs text-amber-950 dark:text-amber-100 print:hidden"
+        >
+          <span>{sharedReportError}</span>
+          {onDismissSharedReport && (
+            <button
+              type="button"
+              onClick={onDismissSharedReport}
+              className="rounded p-1 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer"
+              aria-label="Dismiss shared link notice"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {sharedReportSnapshot && (
+        <section
+          aria-label="Shared Report Snapshot"
+          data-testid="shared-report-banner"
+          className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50/60 dark:bg-red-950/30 p-5 space-y-3"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <Link2 className="h-4 w-4 text-red-600 dark:text-red-400 shrink-0" aria-hidden="true" />
+                <h2 className="text-sm font-bold text-slate-950 dark:text-slate-50">
+                  Shared Report Snapshot
+                  {sharedReportSnapshot.reportName ? ` — ${sharedReportSnapshot.reportName}` : ''}
+                </h2>
+              </div>
+              <p className="font-mono text-[11px] text-slate-600 dark:text-slate-400 tabular-nums">
+                Shared {sharedReportSnapshot.createdAt.slice(0, 16).replace('T', ' ')} UTC · Expires{' '}
+                {sharedReportSnapshot.expiresAt.slice(0, 16).replace('T', ' ')} UTC
+              </p>
+            </div>
+            {onDismissSharedReport && (
+              <button
+                type="button"
+                data-testid="dismiss-shared-report-banner"
+                onClick={onDismissSharedReport}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Exit Shared View</span>
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-xs text-slate-800 dark:text-slate-200 tabular-nums">
+            <span>{sharedReportSnapshot.quickStats.uniqueIndicatorsCount} unique IOCs</span>
+            <span className="text-red-700 dark:text-red-400 font-semibold">
+              {sharedReportSnapshot.totals.malicious} Malicious ({sharedReportSnapshot.quickStats.maliciousPercentage}%)
+            </span>
+            <span className="text-amber-700 dark:text-amber-400">
+              {sharedReportSnapshot.totals.suspicious} Suspicious
+            </span>
+            <span className="text-emerald-700 dark:text-emerald-400">
+              {sharedReportSnapshot.totals.clean} Clean
+            </span>
+          </div>
+
+          {sharedReportSnapshot.topIndicators.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-700 dark:text-slate-300">
+              <span className="font-semibold">Top Indicators:</span>
+              {sharedReportSnapshot.topIndicators.slice(0, 5).map((item) => (
+                <span key={item.indicator} className="font-mono">
+                  {item.indicator}{' '}
+                  <span className="text-slate-500 dark:text-slate-400">
+                    ({item.confidenceScore !== null ? `${item.confidenceScore}/100 · ` : ''}
+                    {item.verdictSummary})
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {sharedReportSnapshot.executiveSummary && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 text-xs leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-wrap">
+              {sharedReportSnapshot.executiveSummary}
+            </div>
+          )}
+        </section>
+      )}
 
       {loadingList ? (
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-sm text-slate-500 dark:text-slate-400">
@@ -690,6 +1059,87 @@ export function ReportsView({
               </div>
             </dl>
           </section>
+
+          {(aiSummary || aiSummaryError || generatingSummary) && (
+            <section
+              aria-label="AI Executive Summary"
+              data-testid="ai-executive-summary-card"
+              className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 md:p-6 space-y-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-red-600 dark:text-red-400 shrink-0" aria-hidden="true" />
+                  <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">
+                    AI Executive Summary
+                  </h2>
+                  {aiSummaryMeta && (
+                    <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                      · {aiSummaryMeta.model} · {aiSummaryMeta.generatedAt.slice(11, 16)} UTC
+                    </span>
+                  )}
+                </div>
+
+                {aiSummary && (
+                  <div className="flex items-center gap-2 shrink-0 print:hidden">
+                    <button
+                      type="button"
+                      data-testid="copy-ai-summary-btn"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(aiSummary);
+                        if (ok) {
+                          setCopiedSummary(true);
+                          window.setTimeout(() => setCopiedSummary(false), 2000);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer"
+                    >
+                      {copiedSummary ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Copy Summary</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAiSummary(null);
+                        setAiSummaryError(null);
+                      }}
+                      aria-label="Close AI executive summary"
+                      className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      <X className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {generatingSummary ? (
+                <div className="flex items-center gap-2 py-2 text-xs text-slate-600 dark:text-slate-400">
+                  <Loader2 className="h-4 w-4 animate-spin text-red-600" aria-hidden="true" />
+                  <span>Synthesizing investigation findings and trend telemetry with Gemini AI...</span>
+                </div>
+              ) : aiSummaryError ? (
+                <div
+                  role="alert"
+                  data-testid="ai-summary-error"
+                  className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 text-xs text-amber-900 dark:text-amber-200"
+                >
+                  {aiSummaryError}
+                </div>
+              ) : (
+                <div data-testid="ai-summary-content">
+                  {renderExecutiveSummaryContent(aiSummary || '')}
+                </div>
+              )}
+            </section>
+          )}
 
           <div className="grid gap-6 xl:grid-cols-2 print:grid-cols-2 print:gap-4">
             <section
@@ -1052,10 +1502,12 @@ export function ReportsView({
             reportCount={allRunsCount || reports.length}
             theme={theme}
             loading={loadingHeatmapRows}
+            activeRegionFilter={activeRegionFilter}
             onInspectIndicator={(indicator) => {
               setVerdictFilter('All');
               setSearchQuery(indicator);
             }}
+            onFilterRecentByRegion={onFilterRecentByRegion}
           />
 
           <section aria-label="Filter historical reports" className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 print:hidden">
@@ -1371,6 +1823,198 @@ export function ReportsView({
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {shareModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs print:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="share-report-modal-title"
+          data-testid="share-report-modal"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShareModalOpen(false);
+          }}
+        >
+          <div className="w-full max-w-xl rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <Share2 className="h-5 w-5 text-red-600 dark:text-red-400 shrink-0" aria-hidden="true" />
+                <div>
+                  <h2
+                    id="share-report-modal-title"
+                    className="text-base font-bold text-slate-950 dark:text-slate-50"
+                  >
+                    Share Threat Intelligence Report
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Generate a temporary report snapshot link and ready-to-paste team briefing.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="close-share-report-modal"
+                onClick={() => setShareModalOpen(false)}
+                aria-label="Close share report modal"
+                className="rounded-lg p-1.5 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 cursor-pointer"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div className="flex-1">
+                  <label
+                    htmlFor="share-ttl-select"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                  >
+                    Temporary Link Expiration
+                  </label>
+                  <select
+                    id="share-ttl-select"
+                    data-testid="share-ttl-select"
+                    value={shareTtlHours}
+                    onChange={(e) => setShareTtlHours(Number(e.target.value))}
+                    className="mt-1.5 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-950 px-3 py-2 text-xs font-medium text-slate-900 dark:text-slate-100 focus:border-red-600 focus:outline-none cursor-pointer"
+                  >
+                    {SHARE_TTL_OPTIONS.map((opt) => (
+                      <option key={opt.hours} value={opt.hours}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="create-share-link-btn"
+                  onClick={handleCreateShareSnapshot}
+                  disabled={creatingShare}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  {creatingShare ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span>{creatingShare ? 'Creating Link...' : 'Generate Temporary Link'}</span>
+                </button>
+              </div>
+
+              {shareError && (
+                <div
+                  role="alert"
+                  className="rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-4 py-2.5 text-xs text-red-800 dark:text-red-200"
+                >
+                  {shareError}
+                </div>
+              )}
+
+              {createdShareUrl && createdShareSnapshot && (
+                <div className="space-y-3 border-t border-slate-100 dark:border-slate-800 pt-4">
+                  <div>
+                    <label
+                      htmlFor="share-link-output"
+                      className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      Temporary Share URL (expires{' '}
+                      {createdShareSnapshot.expiresAt.slice(0, 16).replace('T', ' ')} UTC)
+                    </label>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <input
+                        id="share-link-output"
+                        data-testid="share-link-output"
+                        type="text"
+                        readOnly
+                        value={createdShareUrl}
+                        className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 font-mono text-xs text-slate-900 dark:text-slate-100 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        data-testid="copy-share-link-btn"
+                        onClick={async () => {
+                          const ok = await copyToClipboard(createdShareUrl);
+                          if (ok) {
+                            setCopiedShareLink(true);
+                            window.setTimeout(() => setCopiedShareLink(false), 2000);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        {copiedShareLink ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Copy Link</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="share-message-output"
+                        className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                      >
+                        Pre-Populated Team Message
+                      </label>
+                      <button
+                        type="button"
+                        data-testid="copy-share-message-btn"
+                        onClick={async () => {
+                          const msg = buildShareReportMessage(createdShareSnapshot, createdShareUrl);
+                          const ok = await copyToClipboard(msg);
+                          if (ok) {
+                            setCopiedShareMessage(true);
+                            window.setTimeout(() => setCopiedShareMessage(false), 2000);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-red-700 dark:text-red-400 hover:underline cursor-pointer"
+                      >
+                        {copiedShareMessage ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                            <span>Message Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Copy Message</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <textarea
+                      id="share-message-output"
+                      data-testid="share-message-output"
+                      readOnly
+                      rows={5}
+                      value={buildShareReportMessage(createdShareSnapshot, createdShareUrl)}
+                      className="mt-1.5 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-3 font-mono text-[11px] leading-relaxed text-slate-800 dark:text-slate-200 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 px-6 py-3">
+              <button
+                type="button"
+                onClick={() => setShareModalOpen(false)}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

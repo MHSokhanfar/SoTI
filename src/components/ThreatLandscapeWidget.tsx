@@ -1,16 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
-import { Globe2, MapPin, Search, ShieldAlert } from 'lucide-react';
+import { Globe2, MapPin, Radio, RefreshCw, Search, ShieldAlert } from 'lucide-react';
 import { csvRowsToLookupResults, type HeatmapThresholdFilter } from '../utils/heatmapAnalytics';
 import type { LookupResult } from '../utils/indicators';
 import {
   aggregateThreatLandscape,
+  getLandmassRegionSummary,
+  mergeRealTimeLookupResults,
   WORLD_LAND_GEOJSON,
+  type LandmassRegionSummary,
   type ThreatClusterPoint,
 } from '../utils/threatLandscape';
 import type { ThemeMode } from '../utils/theme';
 
-export type ThreatLandscapeScope = 'all_runs' | 'selected_run' | 'current_investigation';
+export type ThreatLandscapeScope = 'active_realtime' | 'all_runs' | 'selected_run' | 'current_investigation';
 
 interface ThreatLandscapeWidgetProps {
   allRunRows: Record<string, string>[];
@@ -64,23 +67,68 @@ export function ThreatLandscapeWidget({
 }: ThreatLandscapeWidgetProps) {
   const isDark = theme === 'dark';
   const [thresholdFilter, setThresholdFilter] =
-    useState<HeatmapThresholdFilter>('high_confidence');
-  const [scope, setScope] = useState<ThreatLandscapeScope>('all_runs');
+    useState<HeatmapThresholdFilter>('all');
+  const [scope, setScope] = useState<ThreatLandscapeScope>('active_realtime');
+  const [realtimeSyncEnabled, setRealtimeSyncEnabled] = useState<boolean>(true);
+  const [polledReportRows, setPolledReportRows] = useState<Record<string, string>[] | null>(null);
+  const [lastSyncedUtc, setLastSyncedUtc] = useState<string | null>(null);
+  const [syncingRealtime, setSyncingRealtime] = useState(false);
   const [hoveredCode, setHoveredCode] = useState<string | null>(null);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const [mapTooltip, setMapTooltip] = useState<
+    | { kind: 'region'; summary: LandmassRegionSummary; x: number; y: number }
+    | { kind: 'cluster'; cluster: ThreatClusterPoint; x: number; y: number }
+    | null
+  >(null);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [mapWidth, setMapWidth] = useState<number>(640);
 
+  const effectiveAllRunRows = polledReportRows ?? allRunRows;
+
+  const syncRealtimeFeed = useCallback(async () => {
+    setSyncingRealtime(true);
+    try {
+      const res = await fetch('/api/reports/all-rows');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.rows)) {
+          setPolledReportRows(data.rows);
+          setLastSyncedUtc(new Date().toISOString().slice(11, 19));
+        }
+      }
+    } catch {
+      // Non-fatal offline fallback
+    } finally {
+      setSyncingRealtime(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setPolledReportRows(null);
+  }, [allRunRows]);
+
+  useEffect(() => {
+    if (!realtimeSyncEnabled) return;
+    const timer = window.setInterval(() => {
+      void syncRealtimeFeed();
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [realtimeSyncEnabled, syncRealtimeFeed]);
+
   const activeLookupResults = useMemo(() => {
+    if (scope === 'active_realtime') {
+      const histLookup = csvRowsToLookupResults(effectiveAllRunRows);
+      return mergeRealTimeLookupResults(currentResults, histLookup);
+    }
     if (scope === 'current_investigation' && currentResults.length > 0) {
       return currentResults;
     }
     const rows =
-      scope === 'selected_run' && selectedRunRows.length > 0 ? selectedRunRows : allRunRows;
+      scope === 'selected_run' && selectedRunRows.length > 0 ? selectedRunRows : effectiveAllRunRows;
     return csvRowsToLookupResults(rows);
-  }, [scope, currentResults, selectedRunRows, allRunRows]);
+  }, [scope, currentResults, selectedRunRows, effectiveAllRunRows]);
 
   const landscape = useMemo(
     () => aggregateThreatLandscape(activeLookupResults, { thresholdFilter }),
@@ -90,13 +138,14 @@ export function ThreatLandscapeWidget({
   // If user switches to current_investigation and it becomes empty, fall back gracefully
   useEffect(() => {
     if (scope === 'current_investigation' && currentResults.length === 0) {
-      setScope('all_runs');
+      setScope('active_realtime');
     }
   }, [scope, currentResults.length]);
 
   // Keep selected cluster valid when filters change; default-select top cluster when available
   useEffect(() => {
     setHoveredCode(null);
+    setMapTooltip(null);
     setSelectedCode((prev) => {
       if (prev && landscape.clusters.some((c) => c.countryCode === prev)) {
         return prev;
@@ -177,16 +226,67 @@ export function ThreatLandscapeWidget({
       .attr('stroke-width', 0.6)
       .attr('stroke-opacity', 0.75);
 
+    const regionSummaryById = new Map<string, LandmassRegionSummary>();
+    for (const feature of WORLD_LAND_GEOJSON.features) {
+      regionSummaryById.set(feature.id, getLandmassRegionSummary(feature.id, landscape.clusters));
+    }
+
+    const resolveContainerPointer = (event: MouseEvent): { x: number; y: number } => {
+      const rect = mapContainerRef.current?.getBoundingClientRect();
+      if (!rect) return { x: 24, y: 24 };
+      return {
+        x: Math.max(12, Math.min(event.clientX - rect.left, Math.max(12, rect.width - 210))),
+        y: Math.max(12, Math.min(event.clientY - rect.top + 14, Math.max(12, rect.height - 96))),
+      };
+    };
+
+    const landHoverFill = isDark ? '#334155' : '#CBD5E1';
+    const landThreatFill = isDark ? '#263244' : '#DCE4EE';
+
     svg
       .append('g')
       .attr('class', 'threat-landscape-land')
       .selectAll('path')
       .data(WORLD_LAND_GEOJSON.features)
       .join('path')
+      .attr('data-testid', (f) => `world-map-region-${f.id}`)
       .attr('d', (f) => pathGenerator(f as unknown as d3.GeoPermissibleObjects) ?? '')
-      .attr('fill', landFill)
+      .attr('fill', (f) => {
+        const summary = regionSummaryById.get(f.id);
+        return summary && summary.threatCount > 0 ? landThreatFill : landFill;
+      })
       .attr('stroke', landStroke)
-      .attr('stroke-width', 0.85);
+      .attr('stroke-width', 0.85)
+      .style('cursor', 'pointer')
+      .on('mouseenter', (event: MouseEvent, f) => {
+        const summary =
+          regionSummaryById.get(f.id) ?? getLandmassRegionSummary(f.id, landscape.clusters);
+        if (event.currentTarget) {
+          d3.select(event.currentTarget as SVGPathElement)
+            .attr('fill', landHoverFill)
+            .attr('stroke', isDark ? '#F87171' : '#DC2626')
+            .attr('stroke-width', 1.4);
+        }
+        setHoveredCode(null);
+        const pos = resolveContainerPointer(event);
+        setMapTooltip({ kind: 'region', summary, x: pos.x, y: pos.y });
+      })
+      .on('mousemove', (event: MouseEvent, f) => {
+        const summary =
+          regionSummaryById.get(f.id) ?? getLandmassRegionSummary(f.id, landscape.clusters);
+        const pos = resolveContainerPointer(event);
+        setMapTooltip({ kind: 'region', summary, x: pos.x, y: pos.y });
+      })
+      .on('mouseleave', (event: MouseEvent, f) => {
+        if (event.currentTarget) {
+          const summary = regionSummaryById.get(f.id);
+          d3.select(event.currentTarget as SVGPathElement)
+            .attr('fill', summary && summary.threatCount > 0 ? landThreatFill : landFill)
+            .attr('stroke', landStroke)
+            .attr('stroke-width', 0.85);
+        }
+        setMapTooltip(null);
+      });
 
     if (landscape.clusters.length === 0) return;
 
@@ -214,10 +314,19 @@ export function ThreatLandscapeWidget({
         return `translate(${projected[0]}, ${projected[1]})`;
       })
       .style('cursor', 'pointer')
-      .on('mouseenter', (_event, d) => setHoveredCode(d.countryCode))
-      .on('mouseleave', (_event, d) =>
-        setHoveredCode((prev) => (prev === d.countryCode ? null : prev)),
-      )
+      .on('mouseenter', (event: MouseEvent, d) => {
+        setHoveredCode(d.countryCode);
+        const pos = resolveContainerPointer(event);
+        setMapTooltip({ kind: 'cluster', cluster: d, x: pos.x, y: pos.y });
+      })
+      .on('mousemove', (event: MouseEvent, d) => {
+        const pos = resolveContainerPointer(event);
+        setMapTooltip({ kind: 'cluster', cluster: d, x: pos.x, y: pos.y });
+      })
+      .on('mouseleave', (_event, d) => {
+        setHoveredCode((prev) => (prev === d.countryCode ? null : prev));
+        setMapTooltip(null);
+      })
       .on('click', (_event, d) =>
         setSelectedCode((prev) => (prev === d.countryCode ? null : d.countryCode)),
       );
@@ -225,6 +334,8 @@ export function ThreatLandscapeWidget({
     // Outer cluster influence ring (subtle, static hairline)
     clusterGroups
       .append('circle')
+      .attr('class', 'cluster-ring')
+      .style('pointer-events', 'none')
       .attr('r', (d) => radiusScale(d.count) + (d.countryCode === activeCode ? 6 : 3.5))
       .attr('fill', (d) => getTierHexColor(d.dominantTier, isDark))
       .attr('fill-opacity', (d) => (d.countryCode === activeCode ? 0.24 : 0.14))
@@ -235,6 +346,7 @@ export function ThreatLandscapeWidget({
     // Core proportional frequency circle
     clusterGroups
       .append('circle')
+      .attr('class', 'cluster-core')
       .attr('r', (d) => radiusScale(d.count))
       .attr('fill', (d) => getTierHexColor(d.dominantTier, isDark))
       .attr('fill-opacity', 0.92)
@@ -252,6 +364,7 @@ export function ThreatLandscapeWidget({
       .attr('font-family', 'ui-monospace, SFMono-Regular, Menlo, monospace')
       .attr('font-size', (d) => (radiusScale(d.count) >= 12 ? '10.5px' : '9px'))
       .attr('font-weight', '700')
+      .style('pointer-events', 'none')
       .text((d) => String(d.count));
 
     // Non-overlapping country code micro-labels (staggered around dense clusters)
@@ -326,7 +439,43 @@ export function ThreatLandscapeWidget({
         (d) =>
           `${d.countryName} (${d.countryCode}) · ${d.count} IOC${d.count === 1 ? '' : 's'} · Max score ${d.maxScore}/100`,
       );
-  }, [landscape, mapWidth, isDark, hoveredCode, selectedCode, isLoadingEmpty]);
+  }, [landscape, mapWidth, isDark, isLoadingEmpty]);
+
+  // Update active cluster ring/stroke attributes smoothly without recreating SVG nodes
+  useEffect(() => {
+    const svgEl = svgRef.current;
+    if (!svgEl || isLoadingEmpty) return;
+    const isNarrow = Math.max(280, mapWidth) < 440;
+    const radiusScale = d3
+      .scaleSqrt()
+      .domain([1, Math.max(2, landscape.maxClusterCount)])
+      .range([isNarrow ? 5.5 : 7, isNarrow ? 15 : 20]);
+    const activeCode = hoveredCode ?? selectedCode;
+
+    const clusters = d3
+      .select(svgEl)
+      .selectAll<SVGGElement, ThreatClusterPoint>('g.threat-cluster');
+
+    clusters
+      .select<SVGCircleElement>('circle.cluster-ring')
+      .attr('r', (d) => radiusScale(d.count) + (d.countryCode === activeCode ? 6 : 3.5))
+      .attr('fill-opacity', (d) => (d.countryCode === activeCode ? 0.24 : 0.14))
+      .attr('stroke-opacity', (d) => (d.countryCode === activeCode ? 0.75 : 0.35))
+      .attr('stroke-width', (d) => (d.countryCode === activeCode ? 1.5 : 0.8));
+
+    clusters
+      .select<SVGCircleElement>('circle.cluster-core')
+      .attr('stroke', (d) =>
+        d.countryCode === activeCode
+          ? isDark
+            ? '#F8FAFC'
+            : '#0F172A'
+          : isDark
+            ? '#0F172A'
+            : '#FFFFFF',
+      )
+      .attr('stroke-width', (d) => (d.countryCode === activeCode ? 2 : 1.25));
+  }, [hoveredCode, selectedCode, landscape.maxClusterCount, mapWidth, isDark, isLoadingEmpty]);
 
   const activeCluster = useMemo(() => {
     const targetCode = hoveredCode ?? selectedCode;
@@ -372,6 +521,41 @@ export function ThreatLandscapeWidget({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0 print:hidden">
+          <button
+            type="button"
+            data-testid="world-map-realtime-toggle"
+            aria-pressed={realtimeSyncEnabled}
+            onClick={() => {
+              const next = !realtimeSyncEnabled;
+              setRealtimeSyncEnabled(next);
+              if (next) void syncRealtimeFeed();
+            }}
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              realtimeSyncEnabled
+                ? 'border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/35 text-red-700 dark:text-red-300'
+                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+            }`}
+          >
+            <Radio className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{realtimeSyncEnabled ? 'Real-Time Sync' : 'Sync Off'}</span>
+            {lastSyncedUtc && (
+              <span className="font-mono text-[10px] opacity-80 tabular-nums">
+                {lastSyncedUtc}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            data-testid="world-map-refresh-btn"
+            disabled={syncingRealtime}
+            onClick={() => void syncRealtimeFeed()}
+            aria-label="Refresh world map telemetry"
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${syncingRealtime ? 'animate-spin' : ''}`} aria-hidden="true" />
+          </button>
+
           <select
             aria-label="Threat landscape confidence threshold"
             data-testid="threat-landscape-threshold-select"
@@ -379,9 +563,9 @@ export function ThreatLandscapeWidget({
             onChange={(e) => setThresholdFilter(e.target.value as HeatmapThresholdFilter)}
             className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 focus:border-red-600 focus:outline-none cursor-pointer"
           >
+            <option value="all">All Risk Tiers</option>
             <option value="high_confidence">High-Confidence (≥ 50)</option>
             <option value="critical_only">Critical Only (≥ 75)</option>
-            <option value="all">All Risk Tiers</option>
           </select>
 
           <select
@@ -391,6 +575,7 @@ export function ThreatLandscapeWidget({
             onChange={(e) => setScope(e.target.value as ThreatLandscapeScope)}
             className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-200 focus:border-red-600 focus:outline-none cursor-pointer"
           >
+            <option value="active_realtime">Active IOCs (Real-Time)</option>
             <option value="all_runs">All Runs ({reportCount})</option>
             <option value="selected_run" disabled={!selectedRunName}>
               Selected Run{selectedRunName ? `: ${selectedRunName.slice(5, 16)}` : ''}
@@ -414,15 +599,69 @@ export function ThreatLandscapeWidget({
           <div className="min-w-0 space-y-3">
             <div
               ref={mapContainerRef}
-              className="w-full overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800"
+              className="relative w-full overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800"
             >
               <svg
                 ref={svgRef}
                 data-testid="threat-landscape-svg"
                 role="img"
-                aria-label="D3 global threat landscape map showing high-confidence IOC regional clusters"
+                aria-label="D3 global threat landscape map showing active IOC origin points and regional threat counts"
                 className="block w-full select-none"
               />
+
+              {mapTooltip && (
+                <div
+                  data-testid="world-map-hover-tooltip"
+                  role="status"
+                  style={{ left: mapTooltip.x, top: mapTooltip.y }}
+                  className="pointer-events-none absolute z-20 w-52 rounded-lg border border-slate-200 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 px-3 py-2 shadow-md backdrop-blur-xs text-xs"
+                >
+                  {mapTooltip.kind === 'region' ? (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-slate-950 dark:text-slate-50">
+                          {mapTooltip.summary.regionName}
+                        </span>
+                        <span className="font-mono font-semibold text-red-700 dark:text-red-400 tabular-nums">
+                          {mapTooltip.summary.threatCount} threat{mapTooltip.summary.threatCount === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                        {mapTooltip.summary.threatCount > 0
+                          ? `${mapTooltip.summary.countryCount} countr${mapTooltip.summary.countryCount === 1 ? 'y' : 'ies'} · Peak ${mapTooltip.summary.maxScore}/100`
+                          : 'No active IOC origins detected'}
+                      </div>
+                      {mapTooltip.summary.topCountries.length > 0 && (
+                        <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                          {mapTooltip.summary.topCountries
+                            .map((c) => `${c.countryCode} (${c.count})`)
+                            .join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-slate-950 dark:text-slate-50">
+                          {mapTooltip.cluster.countryName} ({mapTooltip.cluster.countryCode})
+                        </span>
+                        <span className="font-mono font-semibold text-red-700 dark:text-red-400 tabular-nums">
+                          {mapTooltip.cluster.count} IOC{mapTooltip.cluster.count === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                        {mapTooltip.cluster.macroRegion} · Max {mapTooltip.cluster.maxScore}/100
+                      </div>
+                      <div className="truncate font-mono text-[11px] text-slate-700 dark:text-slate-200">
+                        {mapTooltip.cluster.indicators
+                          .slice(0, 2)
+                          .map((i) => i.indicator)
+                          .join(', ')}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">

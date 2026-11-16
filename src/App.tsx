@@ -11,6 +11,7 @@ import { LogsView, type LogsNavigationTarget } from './components/LogsView';
 import { ScheduledView, type ScheduledNavigationTarget } from './components/ScheduledView';
 import { CliSetupView } from './components/CliSetupView';
 import { HelpModal } from './components/HelpModal';
+import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { NotificationCenter } from './components/NotificationCenter';
 import {
   ALL_SOURCE_IDS,
@@ -32,7 +33,10 @@ import {
 import type { ProviderQuotaSnapshot } from './utils/quota';
 import type { EmailAlertRecord } from './utils/emailAlerts';
 import type { ReportMeta } from './utils/reportsAnalytics';
+import { parseShareTokenFromUrl, type SharedReportSnapshot } from './utils/reportSharing';
 import type { ScheduledJob } from './utils/scheduler';
+import { matchGlobalKeyboardShortcut } from './utils/keyboardShortcuts';
+import { DEFAULT_LIVE_POLL_SECONDS } from './utils/livePolling';
 import {
   applyThemeToDocument,
   resolveInitialTheme,
@@ -45,6 +49,7 @@ interface ConfigStatus {
   keys: ApiKeyStatus;
   extraKeys: Record<BuiltinExtraSourceId, boolean>;
   customKeys: Record<string, boolean>;
+  maskedHints: Record<string, string>;
   anyKeyConfigured: boolean;
 }
 
@@ -67,6 +72,12 @@ export default function App() {
   });
   const [activeTab, setActiveTab] = useState<ActiveTab>('investigate');
   const [helpOpen, setHelpOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0);
+  const [investigateFocusNonce, setInvestigateFocusNonce] = useState(0);
+  const [recentRegionFilter, setRecentRegionFilter] = useState<string | null>(null);
+  const [sharedReportSnapshot, setSharedReportSnapshot] = useState<SharedReportSnapshot | null>(null);
+  const [sharedReportError, setSharedReportError] = useState<string | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationRequestedTab, setNotificationRequestedTab] = useState<'alerts' | 'email_rules' | null>(null);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
@@ -91,6 +102,7 @@ export default function App() {
     keys: { virustotal: false, abuseipdb: false, alienvault: false },
     extraKeys: { shodan: false, threatfox: false, urlscan: false },
     customKeys: {},
+    maskedHints: {},
     anyKeyConfigured: false,
   });
   const [quotaState, setQuotaState] = useState<QuotaState>({
@@ -114,9 +126,11 @@ export default function App() {
     activeHistoryId: null,
     researcherNotes: '',
     analysisMode: 'standard',
+    livePollingEnabled: false,
+    livePollIntervalSec: DEFAULT_LIVE_POLL_SECONDS,
   });
 
-  function refreshConfigStatus() {
+  const refreshConfigStatus = useCallback(() => {
     fetch('/api/config/status')
       .then((r) => r.json())
       .then((data) => {
@@ -125,6 +139,7 @@ export default function App() {
             keys: data.keys,
             extraKeys: data.extraKeys || { shodan: false, threatfox: false, urlscan: false },
             customKeys: data.customKeys || {},
+            maskedHints: data.maskedHints || {},
             anyKeyConfigured: Boolean(data.anyKeyConfigured),
           });
           if (data.anyKeyConfigured) {
@@ -136,7 +151,7 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }
+  }, []);
 
   function refreshQuotaState() {
     fetch('/api/quota')
@@ -206,6 +221,82 @@ export default function App() {
       window.removeEventListener('focus', refreshQuotaState);
     };
   }, [refreshGlobalSearchData]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const shareToken = parseShareTokenFromUrl(window.location.search, window.location.hash);
+    if (!shareToken) return;
+    setActiveTab('reports');
+    fetch(`/api/reports/share/${encodeURIComponent(shareToken)}`)
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) {
+          setSharedReportError(data?.error || 'Unable to load shared report link.');
+          return;
+        }
+        if (data?.snapshot) {
+          setSharedReportSnapshot(data.snapshot);
+          if (data.snapshot.reportName || data.snapshot.searchQuery) {
+            setReportsNav({
+              reportName: data.snapshot.reportName,
+              searchQuery: data.snapshot.searchQuery || '',
+              nonce: Date.now(),
+            });
+          }
+        }
+      })
+      .catch(() => {
+        setSharedReportError('Unable to reach server to load shared report snapshot.');
+      });
+  }, []);
+
+  useEffect(() => {
+    function handleGlobalKeyDown(event: KeyboardEvent) {
+      const action = matchGlobalKeyboardShortcut(event);
+      if (!action) return;
+
+      if (action === 'escape') {
+        if (shortcutsOpen) setShortcutsOpen(false);
+        if (helpOpen) setHelpOpen(false);
+        if (notificationsOpen) setNotificationsOpen(false);
+        return;
+      }
+
+      event.preventDefault();
+      switch (action) {
+        case 'focus_search':
+          setSearchFocusNonce((n) => n + 1);
+          break;
+        case 'goto_investigate':
+          setActiveTab('investigate');
+          setInvestigateFocusNonce((n) => n + 1);
+          break;
+        case 'goto_reports':
+          setActiveTab('reports');
+          break;
+        case 'goto_scheduled':
+          setActiveTab('scheduled');
+          break;
+        case 'goto_logs':
+          setActiveTab('logs');
+          break;
+        case 'goto_cli':
+          setActiveTab('cli');
+          break;
+        case 'toggle_theme':
+          setTheme((prev) => toggleThemeMode(prev));
+          break;
+        case 'toggle_shortcuts_help':
+          setShortcutsOpen((prev) => !prev);
+          break;
+      }
+    }
+
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, [shortcutsOpen, helpOpen, notificationsOpen]);
 
   useEffect(() => {
     applyThemeToDocument(theme);
@@ -298,6 +389,7 @@ export default function App() {
         latestReport={latestReport}
         apiStatus={effectiveApiStatus}
         onOpenHelp={() => setHelpOpen(true)}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme((prev) => toggleThemeMode(prev))}
         notificationCount={unreadNotifications}
@@ -307,6 +399,7 @@ export default function App() {
           setNotificationsOpen((prev) => !prev);
         }}
         searchEntries={globalSearchEntries}
+        searchFocusNonce={searchFocusNonce}
         onSearchFocus={() => refreshGlobalSearchData(false)}
         onSelectSearchResult={handleSelectGlobalSearchResult}
       />
@@ -349,6 +442,9 @@ export default function App() {
               setNotificationsOpen(true);
             }}
             navigationTarget={investigateNav}
+            focusInputNonce={investigateFocusNonce}
+            recentRegionFilter={recentRegionFilter}
+            onClearRecentRegionFilter={() => setRecentRegionFilter(null)}
             onRecentHistoryChange={setRecentHistory}
           />
         )}
@@ -357,6 +453,24 @@ export default function App() {
             theme={theme}
             navigationTarget={reportsNav}
             currentResults={investigationState.results}
+            activeRegionFilter={recentRegionFilter}
+            onFilterRecentByRegion={(regionLabel, options) => {
+              setRecentRegionFilter(regionLabel);
+              if (options?.navigate && regionLabel) {
+                setActiveTab('investigate');
+              }
+            }}
+            sharedReportSnapshot={sharedReportSnapshot}
+            sharedReportError={sharedReportError}
+            onDismissSharedReport={() => {
+              setSharedReportSnapshot(null);
+              setSharedReportError(null);
+              if (typeof window !== 'undefined' && window.location.search.includes('share=')) {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('share');
+                window.history.replaceState({}, '', url.toString());
+              }
+            }}
           />
         )}
         {activeTab === 'scheduled' && (
@@ -376,6 +490,7 @@ export default function App() {
             keyStatus={configStatus.keys}
             extraKeyStatus={configStatus.extraKeys}
             customKeyStatus={configStatus.customKeys}
+            maskedKeyHints={configStatus.maskedHints}
             apiSettings={apiSettings}
             quota={quotaState}
             emailAlertsRefreshNonce={emailAlertsRefreshNonce}
@@ -383,6 +498,7 @@ export default function App() {
               setApiSettings(next);
               refreshConfigStatus();
             }}
+            onKeyStatusUpdated={refreshConfigStatus}
             onQuotaChange={setQuotaState}
             onConnectionTestResult={(provider, ok) => {
               if (provider === 'virustotal' || provider === 'abuseipdb' || provider === 'alienvault') {
@@ -396,12 +512,63 @@ export default function App() {
         )}
       </main>
 
+      <footer
+        data-testid="keyboard-shortcut-hints"
+        className="border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-950/80 print:hidden"
+      >
+        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-[11px] text-slate-500 dark:text-slate-400 md:px-6">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span>
+              <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-200">
+                Ctrl+K
+              </kbd>{' '}
+              / <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-200">/</kbd> Search
+            </span>
+            <span>
+              <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-200">
+                Ctrl+I
+              </kbd>{' '}
+              Investigate
+            </span>
+            <span className="hidden sm:inline">
+              <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-200">
+                Alt+1–5
+              </kbd>{' '}
+              Switch Tabs
+            </span>
+            <span className="hidden md:inline">
+              <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-200">
+                Alt+T
+              </kbd>{' '}
+              Theme
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShortcutsOpen(true)}
+            className="inline-flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300 hover:text-slate-950 dark:hover:text-white cursor-pointer"
+          >
+            <span>Press</span>
+            <kbd className="rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-700 dark:text-slate-200">
+              ?
+            </kbd>
+            <span>for all shortcuts</span>
+          </button>
+        </div>
+      </footer>
+
       <HelpModal
         open={helpOpen}
         onClose={() => setHelpOpen(false)}
         onOpenApiSettings={() => setActiveTab('cli')}
         keyStatus={effectiveApiStatus}
         extraKeyStatus={configStatus.extraKeys}
+      />
+
+      <KeyboardShortcutsModal
+        open={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
       />
     </div>
   );

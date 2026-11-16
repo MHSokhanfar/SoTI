@@ -497,4 +497,49 @@ export function mergeConfigAndConnectionStatus(
   };
 }
 
+export const BUILTIN_KEY_ENV_VAR_BY_ID: Readonly<Record<SourceId | BuiltinExtraSourceId, string>> = {
+  virustotal: 'VT_API_KEY',
+  abuseipdb: 'ABUSEIPDB_API_KEY',
+  alienvault: 'OTX_API_KEY',
+  shodan: 'SHODAN_API_KEY',
+  threatfox: 'THREATFOX_AUTH_KEY',
+  urlscan: 'URLSCAN_API_KEY',
+};
 
+export const ALLOWED_BUILTIN_KEY_ENV_VARS: readonly string[] = Object.values(BUILTIN_KEY_ENV_VAR_BY_ID);
+
+const BLOCKED_SYSTEM_ENV_PREFIXES = ['GEMINI_', 'GOOGLE_', 'SMTP_', 'NODE_', 'NPM_', 'VITE_', 'APP_'];
+const BLOCKED_SYSTEM_ENV_EXACT = new Set([
+  'PORT',
+  'PATH',
+  'HOME',
+  'PWD',
+  'SHELL',
+  'USER',
+  'TERM',
+  'HOSTNAME',
+  'APP_URL',
+  'GEMINI_API_KEY',
+]);
+
+export function isEditableThreatIntelEnvVar(
+  rawEnvVar: string,
+  settings?: Pick<ApiSettings, 'customProviders'>,
+): boolean {
+  const name = String(rawEnvVar || '').trim().toUpperCase();
+  if (!ENV_VAR_NAME_RE.test(name)) return false;
+  if (BLOCKED_SYSTEM_ENV_EXACT.has(name)) return false;
+  if (BLOCKED_SYSTEM_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))) return false;
+  if (ALLOWED_BUILTIN_KEY_ENV_VARS.includes(name)) return true;
+  if (settings?.customProviders?.some((cp) => cp.envVarName.toUpperCase() === name)) {
+    return true;
+  }
+  return false;
+}
+
+export function maskSecretHint(secret: string | null | undefined): string {
+  const val = String(secret || '').trim();
+  if (!val) return '';
+  if (val.length <= 6) return '••••••';
+  return `••••${val.slice(-4)}`;
+}

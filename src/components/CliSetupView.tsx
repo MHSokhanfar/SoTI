@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 import {
   Activity,
   CheckCircle2,
+  Eye,
+  EyeOff,
   Gauge,
   HelpCircle,
+  KeyRound,
   Mail,
   Plus,
   RotateCcw,
@@ -38,10 +41,12 @@ interface CliSetupViewProps {
   };
   extraKeyStatus: Record<BuiltinExtraSourceId, boolean>;
   customKeyStatus: Record<string, boolean>;
+  maskedKeyHints?: Record<string, string>;
   apiSettings: ApiSettings;
   quota: QuotaState;
   emailAlertsRefreshNonce?: number;
   onApiSettingsChange: (next: ApiSettings) => void;
+  onKeyStatusUpdated?: () => void;
   onQuotaChange: (next: QuotaState) => void;
   onConnectionTestResult?: (provider: string, ok: boolean) => void;
   onConnectionOverridesReset?: () => void;
@@ -123,10 +128,12 @@ export function CliSetupView({
   keyStatus,
   extraKeyStatus,
   customKeyStatus,
+  maskedKeyHints = {},
   apiSettings,
   quota,
   emailAlertsRefreshNonce = 0,
   onApiSettingsChange,
+  onKeyStatusUpdated,
   onQuotaChange,
   onConnectionTestResult,
   onConnectionOverridesReset,
@@ -142,6 +149,11 @@ export function CliSetupView({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const [keyVisible, setKeyVisible] = useState<Record<string, boolean>>({});
+  const [savingKeyId, setSavingKeyId] = useState<string | null>(null);
+  const [keyFeedback, setKeyFeedback] = useState<Record<string, { ok: boolean; text: string }>>({});
+
   // New Custom Provider Form State (metadata + env var NAME only, zero secret values)
   const [customName, setCustomName] = useState('');
   const [customEndpoint, setCustomEndpoint] = useState('');
@@ -155,6 +167,179 @@ export function CliSetupView({
   useEffect(() => {
     setDraft(apiSettings);
   }, [apiSettings]);
+
+  async function handleSaveProviderKey(providerId: string, envVarName: string) {
+    const val = (keyDrafts[providerId] || '').trim();
+    if (!val) return;
+    setSavingKeyId(providerId);
+    setKeyFeedback((prev) => {
+      const next = { ...prev };
+      delete next[providerId];
+      return next;
+    });
+    try {
+      const resp = await fetch('/api/config/keys', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId, envVarName, apiKey: val }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setKeyFeedback((prev) => ({
+          ...prev,
+          [providerId]: { ok: false, text: data?.error || 'Failed to save API key.' },
+        }));
+        return;
+      }
+      setKeyDrafts((prev) => ({ ...prev, [providerId]: '' }));
+      setKeyVisible((prev) => ({ ...prev, [providerId]: false }));
+      setKeyFeedback((prev) => ({
+        ...prev,
+        [providerId]: {
+          ok: true,
+          text: `${envVarName} saved securely on server (${data.maskedHints?.[providerId] || 'configured'}).`,
+        },
+      }));
+      onKeyStatusUpdated?.();
+    } catch {
+      setKeyFeedback((prev) => ({
+        ...prev,
+        [providerId]: { ok: false, text: 'Network error while saving API key.' },
+      }));
+    } finally {
+      setSavingKeyId(null);
+    }
+  }
+
+  async function handleClearProviderKey(providerId: string, envVarName: string) {
+    setSavingKeyId(providerId);
+    try {
+      const resp = await fetch('/api/config/keys', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId, envVarName, clear: true }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setKeyFeedback((prev) => ({
+          ...prev,
+          [providerId]: { ok: false, text: data?.error || 'Failed to clear API key.' },
+        }));
+        return;
+      }
+      setKeyDrafts((prev) => ({ ...prev, [providerId]: '' }));
+      setKeyFeedback((prev) => ({
+        ...prev,
+        [providerId]: { ok: true, text: `Cleared saved key for ${envVarName}.` },
+      }));
+      onKeyStatusUpdated?.();
+    } catch {
+      setKeyFeedback((prev) => ({
+        ...prev,
+        [providerId]: { ok: false, text: 'Network error while clearing API key.' },
+      }));
+    } finally {
+      setSavingKeyId(null);
+    }
+  }
+
+  function renderApiKeyEditor(providerId: string, envVarName: string, isConfigured: boolean) {
+    const draftVal = keyDrafts[providerId] || '';
+    const isVisible = Boolean(keyVisible[providerId]);
+    const isBusy = savingKeyId === providerId;
+    const hint = maskedKeyHints[providerId] || '';
+    const fb = keyFeedback[providerId];
+
+    return (
+      <div className="mt-3 rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 p-3 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <label
+            htmlFor={`api-key-input-${providerId}`}
+            className="inline-flex items-center gap-1.5 font-medium text-slate-700 dark:text-slate-300"
+          >
+            <KeyRound className="h-3 w-3 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+            <span>
+              API Key (<code className="font-mono">{envVarName}</code>)
+            </span>
+          </label>
+          {isConfigured && hint && (
+            <span
+              data-testid={`api-key-hint-${providerId}`}
+              className="font-mono text-emerald-700 dark:text-emerald-400"
+            >
+              Configured ({hint})
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px]">
+            <input
+              id={`api-key-input-${providerId}`}
+              data-testid={`api-key-input-${providerId}`}
+              type={isVisible ? 'text' : 'password'}
+              autoComplete="off"
+              spellCheck={false}
+              value={draftVal}
+              onChange={(e) => setKeyDrafts((prev) => ({ ...prev, [providerId]: e.target.value }))}
+              placeholder={
+                isConfigured
+                  ? `Saved (${hint || 'masked'}) — paste new key to replace`
+                  : `Paste ${envVarName} value...`
+              }
+              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 py-1.5 pl-3 pr-9 font-mono text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:border-red-600 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => setKeyVisible((prev) => ({ ...prev, [providerId]: !isVisible }))}
+              aria-label={isVisible ? `Hide ${envVarName}` : `Show ${envVarName}`}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+            >
+              {isVisible ? (
+                <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+            </button>
+          </div>
+
+          <button
+            type="button"
+            data-testid={`save-key-btn-${providerId}`}
+            disabled={isBusy || draftVal.trim().length < 4}
+            onClick={() => handleSaveProviderKey(providerId, envVarName)}
+            className="inline-flex items-center gap-1 rounded-lg bg-slate-900 dark:bg-slate-100 px-3 py-1.5 text-xs font-semibold text-white dark:text-slate-950 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Save className="h-3 w-3" aria-hidden="true" />
+            <span>{isBusy ? 'Saving...' : 'Save Key'}</span>
+          </button>
+
+          {isConfigured && (
+            <button
+              type="button"
+              data-testid={`clear-key-btn-${providerId}`}
+              disabled={isBusy}
+              onClick={() => handleClearProviderKey(providerId, envVarName)}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Clear Key
+            </button>
+          )}
+        </div>
+
+        {fb && (
+          <p
+            data-testid={`key-feedback-${providerId}`}
+            className={`text-[11px] font-medium ${
+              fb.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'
+            }`}
+          >
+            {fb.text}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   const quotaMap = new Map(quota.providers.map((p) => [p.providerId, p]));
 
@@ -638,6 +823,8 @@ export function CliSetupView({
                       resetting={resettingQuotaId === p.id}
                     />
 
+                    {renderApiKeyEditor(p.id, p.envVar, isConfigured)}
+
                     {testResult && (
                       <div
                         data-testid={`test-result-${p.id}`}
@@ -771,6 +958,8 @@ export function CliSetupView({
                       onReset={() => handleResetQuota(id)}
                       resetting={resettingQuotaId === id}
                     />
+
+                    {renderApiKeyEditor(id, meta.envVar, isConfigured)}
 
                     {testResult && (
                       <div
@@ -951,6 +1140,8 @@ export function CliSetupView({
                       onReset={() => handleResetQuota(cp.id)}
                       resetting={resettingQuotaId === cp.id}
                     />
+
+                    {renderApiKeyEditor(cp.id, cp.envVarName, isConfigured)}
 
                     {testResult && (
                       <div

@@ -5,6 +5,7 @@ import {
   buildUnifiedBatchTable,
   deduplicateBulkInputLines,
   filterUnifiedBatchRows,
+  formatIndicatorsAsNewlines,
   formatUnifiedBatchRowClipboard,
   summarizeBulkInputStats,
 } from './bulkAnalysis';
@@ -26,17 +27,23 @@ function makeResult(overrides: Partial<LookupResult> = {}): LookupResult {
   };
 }
 
-test('summarizeBulkInputStats and deduplicateBulkInputLines categorize and deduplicate IOCs', () => {
+test('summarizeBulkInputStats, formatIndicatorsAsNewlines, and deduplicateBulkInputLines work cleanly', () => {
   const raw = '1[.]2[.]3[.]4\n1.2.3.4\nevil.com\n44d88612fea8a8f36de82e1278abb02f\nnot_an_ioc';
   const stats = summarizeBulkInputStats(raw);
   assert.deepEqual(stats, {
     totalValid: 3,
+    lineCount: 5,
     ipCount: 1,
     domainCount: 1,
     hashCount: 1,
     invalidCount: 1,
     defangedCount: 1,
   });
+
+  assert.equal(
+    formatIndicatorsAsNewlines('1[.]2[.]3[.]4, 8.8.8.8, evil.com'),
+    '1[.]2[.]3[.]4\n8.8.8.8\nevil.com',
+  );
 
   assert.equal(
     deduplicateBulkInputLines(raw),

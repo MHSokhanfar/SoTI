@@ -7,9 +7,12 @@ import {
 import {
   addTagToIndicator,
   collectTagsForIndicators,
+  filterItemsByIndicatorTag,
   filterRecentInvestigationsByTag,
   getAllUniqueTags,
   getTagsForIndicator,
+  getUniqueTagsForIndicators,
+  indicatorMatchesTagFilter,
   IOC_TAGS_STORAGE_KEY,
   loadIndicatorTags,
   normalizeTagLabel,
@@ -129,3 +132,35 @@ test('loadIndicatorTags and saveIndicatorTags handle storage persistence and cor
   assert.equal(saveIndicatorTags(storage, {}), true);
   assert.equal(storage.getItem(IOC_TAGS_STORAGE_KEY), null);
 });
+
+test('getUniqueTagsForIndicators and filterItemsByIndicatorTag support in-table triage filtering', () => {
+  let map = addTagToIndicator({}, '1.2.3.4', 'Malware');
+  map = addTagToIndicator(map, '1.2.3.4', 'Critical');
+  map = addTagToIndicator(map, '8.8.8.8', 'False Positive');
+  map = addTagToIndicator(map, 'evil.com', 'Phishing');
+
+  const unique = getUniqueTagsForIndicators(map, ['1.2.3.4', '8.8.8.8', '9.9.9.9']);
+  assert.deepEqual(unique, ['Critical', 'False Positive', 'Malware']);
+
+  assert.equal(indicatorMatchesTagFilter(map, '8.8.8.8', 'false positive'), true);
+  assert.equal(indicatorMatchesTagFilter(map, '1.2.3.4', 'False Positive'), false);
+
+  const rows = [
+    { indicator: '1.2.3.4', source: 'VirusTotal' },
+    { indicator: '8.8.8.8', source: 'VirusTotal' },
+    { indicator: 'evil.com', source: 'AlienVault OTX' },
+  ];
+  assert.deepEqual(
+    filterItemsByIndicatorTag(rows, 'All', map).map((r) => r.indicator),
+    ['1.2.3.4', '8.8.8.8', 'evil.com'],
+  );
+  assert.deepEqual(
+    filterItemsByIndicatorTag(rows, 'False Positive', map).map((r) => r.indicator),
+    ['8.8.8.8'],
+  );
+  assert.deepEqual(
+    filterItemsByIndicatorTag(rows, 'Phishing', map).map((r) => r.indicator),
+    ['evil.com'],
+  );
+});
+

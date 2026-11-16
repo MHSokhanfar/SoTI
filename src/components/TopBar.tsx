@@ -6,6 +6,7 @@ import {
   FileSpreadsheet,
   HelpCircle,
   History,
+  Keyboard,
   Moon,
   ScrollText,
   Search,
@@ -39,7 +40,9 @@ interface TopBarProps {
   notificationsOpen: boolean;
   onToggleNotifications: () => void;
   searchEntries: GlobalSearchEntry[];
+  searchFocusNonce?: number;
   onSearchFocus?: () => void;
+  onOpenShortcuts?: () => void;
   onSelectSearchResult: (entry: GlobalSearchEntry, query: string) => void;
 }
 
@@ -108,7 +111,9 @@ export function TopBar({
   notificationsOpen,
   onToggleNotifications,
   searchEntries,
+  searchFocusNonce = 0,
   onSearchFocus,
+  onOpenShortcuts,
   onSelectSearchResult,
 }: TopBarProps) {
   const isDark = theme === 'dark';
@@ -119,6 +124,9 @@ export function TopBar({
 
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const onSearchFocusRef = useRef(onSearchFocus);
+  onSearchFocusRef.current = onSearchFocus;
+  const lastHandledFocusNonceRef = useRef(searchFocusNonce);
 
   const filteredResults = useMemo(
     () => searchGlobalEntries(searchEntries, searchQuery, { tabFilter, limit: 14 }),
@@ -130,6 +138,22 @@ export function TopBar({
   }, [searchQuery, tabFilter, filteredResults.length]);
 
   useEffect(() => {
+    setSearchOpen(false);
+    if (document.activeElement === searchInputRef.current) {
+      searchInputRef.current?.blur();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (searchFocusNonce > 0 && searchFocusNonce !== lastHandledFocusNonceRef.current) {
+      lastHandledFocusNonceRef.current = searchFocusNonce;
+      searchInputRef.current?.focus();
+      setSearchOpen(true);
+      onSearchFocusRef.current?.();
+    }
+  }, [searchFocusNonce]);
+
+  useEffect(() => {
     function handleOutsideMouseDown(event: MouseEvent) {
       if (
         searchContainerRef.current &&
@@ -139,38 +163,19 @@ export function TopBar({
       }
     }
 
-    function handleGlobalKeyDown(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null;
-      const isEditing =
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT' ||
-          target.isContentEditable);
-
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        searchInputRef.current?.focus();
-        setSearchOpen(true);
-        onSearchFocus?.();
-        return;
-      }
-
-      if (!isEditing && event.key === '/') {
-        event.preventDefault();
-        searchInputRef.current?.focus();
-        setSearchOpen(true);
-        onSearchFocus?.();
+    function handleEscapeClose(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setSearchOpen(false);
       }
     }
 
     document.addEventListener('mousedown', handleOutsideMouseDown);
-    document.addEventListener('keydown', handleGlobalKeyDown);
+    document.addEventListener('keydown', handleEscapeClose);
     return () => {
       document.removeEventListener('mousedown', handleOutsideMouseDown);
-      document.removeEventListener('keydown', handleGlobalKeyDown);
+      document.removeEventListener('keydown', handleEscapeClose);
     };
-  }, [onSearchFocus]);
+  }, []);
 
   function handleSelectEntry(entry: GlobalSearchEntry) {
     setSearchOpen(false);
@@ -495,6 +500,20 @@ export function TopBar({
             )}
             <span className="hidden 2xl:inline">{isDark ? 'Light' : 'Dark'}</span>
           </button>
+
+          {onOpenShortcuts && (
+            <button
+              type="button"
+              data-testid="shortcuts-modal-button"
+              onClick={onOpenShortcuts}
+              aria-label="Open keyboard shortcuts guide"
+              title="Keyboard shortcuts (?)"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-1.5 sm:px-2 sm:py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-950 dark:hover:text-white whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 dark:focus-visible:outline-slate-200"
+            >
+              <Keyboard className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="sr-only">Shortcuts</span>
+            </button>
+          )}
 
           <button
             type="button"

@@ -8,6 +8,8 @@ import {
   evaluateHeartbeatResponse,
   getAllEnabledProviderIds,
   getEnabledSourceIds,
+  isEditableThreatIntelEnvVar,
+  maskSecretHint,
   mergeConfigAndConnectionStatus,
   resolveSelectedSources,
   validateAndNormalizeApiSettings,
@@ -132,5 +134,35 @@ test('custom threat intelligence providers validate env var names and integrate 
     assert.ok(allEnabled.includes(valid.provider.id));
   }
 });
+
+test('isEditableThreatIntelEnvVar allows provider keys, blocks system/Gemini vars, and masks secrets', () => {
+  assert.equal(isEditableThreatIntelEnvVar('VT_API_KEY'), true);
+  assert.equal(isEditableThreatIntelEnvVar('URLSCAN_API_KEY'), true);
+  assert.equal(isEditableThreatIntelEnvVar('GEMINI_API_KEY'), false);
+  assert.equal(isEditableThreatIntelEnvVar('SMTP_PASS'), false);
+  assert.equal(isEditableThreatIntelEnvVar('PORT'), false);
+
+  const settings = cloneDefaultApiSettings();
+  settings.customProviders = [
+    {
+      id: 'custom-greynoise',
+      name: 'GreyNoise',
+      enabled: true,
+      endpointTemplate: 'https://api.greynoise.io/v3/community/{indicator}',
+      authHeader: 'key',
+      authPrefix: '',
+      envVarName: 'GREYNOISE_API_KEY',
+      supportedTypes: ['ip'],
+      dailyQuotaLimit: 50,
+    },
+  ];
+  assert.equal(isEditableThreatIntelEnvVar('GREYNOISE_API_KEY', settings), true);
+  assert.equal(isEditableThreatIntelEnvVar('UNREGISTERED_VAR', settings), false);
+
+  assert.equal(maskSecretHint('abcdef1234567890'), '••••7890');
+  assert.equal(maskSecretHint('short'), '••••••');
+  assert.equal(maskSecretHint(''), '');
+});
+
 
 

@@ -427,3 +427,49 @@ export function computeAllIocConfidenceScores(
   }
   return map;
 }
+
+export const RISK_THRESHOLD_STORAGE_KEY = 'soti_investigate_risk_threshold_v1';
+
+export function normalizeRiskThreshold(value: unknown): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(100, Math.round(num)));
+}
+
+export function passesRiskThreshold(
+  confidenceScore: number | null | undefined,
+  minThreshold: number,
+): boolean {
+  const threshold = normalizeRiskThreshold(minThreshold);
+  if (threshold <= 0) return true;
+  return (
+    typeof confidenceScore === 'number' &&
+    Number.isFinite(confidenceScore) &&
+    confidenceScore >= threshold
+  );
+}
+
+export function loadRiskThreshold(
+  storage?: { getItem: (key: string) => string | null } | null,
+): number {
+  if (!storage) return 0;
+  try {
+    const raw = storage.getItem(RISK_THRESHOLD_STORAGE_KEY);
+    if (!raw) return 0;
+    return normalizeRiskThreshold(Number(raw));
+  } catch {
+    return 0;
+  }
+}
+
+export function saveRiskThreshold(
+  storage: { setItem: (key: string, value: string) => void } | null | undefined,
+  threshold: number,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(RISK_THRESHOLD_STORAGE_KEY, String(normalizeRiskThreshold(threshold)));
+  } catch {
+    // ignore storage errors
+  }
+}
