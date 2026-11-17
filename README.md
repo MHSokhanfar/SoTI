@@ -27,7 +27,7 @@ Install the following before setting up SoTI locally:
 | **Python** | `3.10+` with `pip` | Run the Python CLI (`main.py`) and Python unit tests |
 | **Node.js & npm** | `Node.js 22+` (`22 LTS` recommended) | Run the Express backend (`server.ts`), React/Vite Web Workbench, TypeScript unit tests, and production builds |
 | **Threat Intel API Keys** | Free or standard tier | Live lookups against VirusTotal, AbuseIPDB, AlienVault OTX, Shodan, ThreatFox, URLScan *(optional for offline Demo / Sample mode)* |
-| **Gemini API Key** *(Optional)* | Standard AI Studio / Gemini key | Server-side AI executive summary generation in the Web Workbench Reports view (`GEMINI_API_KEY`) |
+| **Gemini API Key** *(Optional)* | Gemini API key | Server-side AI executive summary generation in the Web Workbench Reports view (`GEMINI_API_KEY`) |
 
 ---
 
