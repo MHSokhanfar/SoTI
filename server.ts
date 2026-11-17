@@ -2748,7 +2748,7 @@ async function createApp() {
     try {
       const ai = new GoogleGenAI({
         apiKey: geminiKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        httpOptions: { headers: { 'User-Agent': 'SoTI-Threat-Intelligence' } },
       });
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
